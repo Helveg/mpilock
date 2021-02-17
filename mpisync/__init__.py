@@ -27,8 +27,11 @@ class WindowController:
         self._write_window = self._window(self._write_buffer)
 
     def close(self):
-        self._read_window.Free()
-        self._write_window.Free()
+        try:
+            self._read_window.Free()
+            self._write_window.Free()
+        except MPI.Exception:
+            pass
 
     def _window(self, buffer):
         return MPI.Win.Create(buffer, True, MPI.INFO_NULL, self._comm)
@@ -101,9 +104,7 @@ class _WriteLock:
     def __exit__(self, exc_type, exc_value, traceback):
         self._write_window.Unlock(0)
         if self._fence is not None:
-            print("master waiting for others")
             self._fence._comm.Barrier()
-            print("others joined")
 
 
 class _Fence:
