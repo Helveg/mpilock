@@ -1,4 +1,4 @@
-name: Upload BSB Package
+name: Upload mpisync package
 
 on:
   release:
