@@ -81,11 +81,11 @@ class _WriteLock:
         self._handle = handle
 
     def __enter__(self):
-        self._write_window.Lock(0)
         # A write lock can be opened on top of a read lock, but if our read
         # flag is `True` we'll be deadlocked waiting for it to be unset, so we
         # save our read state, unset it and instead restore it later.
         reading = self._read_buffer[0]
+        self._write_window.Lock(0)
         self._read_buffer[0] = 0
         self._read_window.Lock_all()
         all_read = [np.zeros(1, dtype=np.uint64) for _ in range(self._size)]
