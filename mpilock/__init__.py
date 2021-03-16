@@ -128,7 +128,7 @@ class WindowController:
 
         Keep in mind that if you run this code on multiple processes at the same time that
         they will write one by one, but they will still all write eventually. If only one
-        of the nodes needs to perform the writing operation see :method:`.WindowController.single_write`
+        of the nodes needs to perform the writing operation see :meth:`~.WindowController.single_write`
 
         :return: An unfenced write lock
         """
@@ -246,8 +246,8 @@ class Fence:
     """
     Can be used to fence off pieces of code from processes that shouldn't access it.
     Additionally it can be used to share a resource to all processes that was created
-    within the fenced off code block using :method:`.Fence.share` and
-    :method:`.Fence.collect`.
+    within the fenced off code block using :meth:`.Fence.share` and
+    :meth:`.Fence.collect`.
     """
 
     def __init__(self, master, access, comm):

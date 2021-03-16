@@ -13,22 +13,24 @@ Welcome to mpilock's documentation!
 About
 -----
 
-``mpilock`` offers a ``WindowController`` class with a high-level API
-for parallel access to resources. The ``WindowController`` can be used
-to perform ``read``, ``write`` or ``single_write``.
+``mpilock`` offers a :class:`mpilock.WindowController` class with a high-level API
+for parallel access to resources. The :class:`mpilock.WindowController` can be used
+to perform :meth:`~mpilock.WindowController.read`, :meth:`~mpilock.WindowController.write`
+or :meth:`~mpilock.WindowController.single_write`.
 
 Read operations happen in parallel while write operations will lock the
 resource and prevent any new read or write operations and will wait for
 all existing read operations to finish. After the write operation
 completes the lock is released and other operations can resume.
 
-The ``WindowController`` does not contain any logic to control the
+The :class:`mpilock.WindowController` does not contain any logic to control the
 resources, it only locks and synchronizes the MPI processes. Once the
 operation permission is obtained it’s up to the user to perform the
 reading/writing to the resources.
 
-The ``sync`` method is a factory for ``WindowController``\ s and can
-simplify creation of ``WindowController``\ s.
+The :func:`.sync` function is a factory function for :class:`WindowControllers
+<.WindowController>` and can simplify creation of
+:class:`WindowControllers <.WindowController>`.
 
 Example usage
 -------------
@@ -66,6 +68,13 @@ Example usage
     # The window controller itself needs to be closed as well (is done atexit)
     ctrl.close()
 
+Reference
+=========
+
+.. automodule:: mpilock
+   :members:
+   :undoc-members:
+   :show-inheritance:
 
 Indices and tables
 ==================

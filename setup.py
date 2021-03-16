@@ -5,7 +5,10 @@ import sys
 
 from setuptools import find_packages, setup
 
-requires = ["mpi4py>=3.0.3", "numpy>=1.20.0"]
+requires = ["numpy>=1.20.0"]
+
+if "READTHEDOCS" not in os.environ:
+    requires.append("mpi4py>=3.0.3")
 
 with open("mpilock/__init__.py", "r") as f:
     for line in f.readlines():
