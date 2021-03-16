@@ -108,7 +108,7 @@ class WindowController:
                 # Perform reading operation
                 pass
 
-        :return: An read lock
+        :return: A read lock
         """
         return _ReadLock(self._read_buffer, self._write_window, self._master)
 
