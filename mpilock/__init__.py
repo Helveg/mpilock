@@ -128,7 +128,7 @@ class WindowController:
 
         Keep in mind that if you run this code on multiple processes at the same time that
         they will write one by one, but they will still all write eventually. If only one
-        of the nodes needs to perform the writing operation see :meth:`.WindowController.single_write`
+        of the nodes needs to perform the writing operation see :meth:`~.WindowController.single_write`
 
         :return: An unfenced write lock
         """
