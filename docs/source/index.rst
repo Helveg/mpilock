@@ -66,6 +66,13 @@ Example usage
     # The window controller itself needs to be closed as well (is done atexit)
     ctrl.close()
 
+Reference
+=========
+
+.. automodule:: mpilock
+   :members:
+   :undoc-members:
+   :show-inheritance:
 
 Indices and tables
 ==================
