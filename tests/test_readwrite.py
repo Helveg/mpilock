@@ -61,6 +61,13 @@ class TestLocking(unittest.TestCase):
         else:
             self.assertEqual(False, spy, "Non-master entered collective write.")
 
+    def test_fence_collecting(self):
+        with self.controller.single_write() as fence:
+            fence.guard()
+            fence.share(5)
+        r = fence.collect()
+        self.assertEqual(5, r, "Fenced resource was not correctly collected.")
+
     def test_collective_handle(self):
         essential = 5
         spy = False

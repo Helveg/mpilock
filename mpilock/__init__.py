@@ -9,10 +9,33 @@ import numpy as np, time
 
 
 def sync(comm=None, master=0):
+    """
+    Create a :class:`.WindowController` that synchronizes read write operations across all
+    MPI processes in the communicator.
+
+    :param comm: MPI communicator
+    :type comm: :class:`mpi4py.MPI.Communicator`
+    :param master: Rank of the master of the communicator, will be picked whenever
+      something needs to be organized or decided by a single node in the communicator.
+    :type comm: int
+
+    :return: A controller
+    :rtype: :class:`.WindowController`
+    """
     return WindowController(comm, master)
 
 
 class WindowController:
+    """
+    The ``WindowController`` manages the state of the MPI windows underlying the lock
+    functionality. Instances can be created using the :func:`.sync` factory function.
+
+    The controller can create read and write locks during which your MPI processes are
+    aware of each other's operations and a write lock will never be granted if other
+    read or write operations are ongoing, while read locks may be granted while other read
+    operations are ongoing, but not if any write locks are acquired or being requested.
+    """
+
     def __init__(self, comm=None, master=0):
         if comm is None:
             comm = MPI.COMM_WORLD
@@ -30,17 +53,30 @@ class WindowController:
 
     @property
     def master(self):
+        """
+        Return the MPI rank of the master process.
+        """
         return self._master
 
     @property
     def rank(self):
+        """
+        Return the MPI rank of this process.
+        """
         return self._rank
 
     @property
     def closed(self):
+        """
+        Is this ``WindowController`` in a closed state? If so, further locks can not be
+        requested.
+        """
         return self._closed
 
     def close(self):
+        """
+        Close the ``WindowController`` and its underlying MPI Windows.
+        """
         try:
             self._read_window.Free()
             self._write_window.Free()
@@ -58,9 +94,44 @@ class WindowController:
         return MPI.Win.Create(buffer, True, MPI.INFO_NULL, self._comm)
 
     def read(self):
+        """
+        Acquire a read lock. Read locks can be granted while other read locks are held,
+        but will not start as long as write locks are held or being requested (write
+        operations have priority over read operations).
+
+        The preferred idiom for read locks is as follows:
+
+        .. code-block:: python
+
+            controller = sync()
+            with controller.read():
+                # Perform reading operation
+                pass
+
+        :return: A read lock
+        """
         return _ReadLock(self._read_buffer, self._write_window, self._master)
 
     def write(self):
+        """
+        Acquire a write lock. Will wait for all active read locks to be released and
+        prevent any new read locks from being aqcuired.
+
+        The preferred idiom for write locks is as follows:
+
+        .. code-block:: python
+
+            controller = sync()
+            with controller.write():
+                # Perform writing operation
+                pass
+
+        Keep in mind that if you run this code on multiple processes at the same time that
+        they will write one by one, but they will still all write eventually. If only one
+        of the nodes needs to perform the writing operation see :method:`.WindowController.single_write`
+
+        :return: An unfenced write lock
+        """
         return _WriteLock(
             self._read_buffer,
             self._read_window,
@@ -70,9 +141,28 @@ class WindowController:
         )
 
     def single_write(self, handle=None, rank=None):
+        """
+        Perform a collective operation where only 1 node writes to the resource and the
+        other processes wait for this operation to complete.
+
+        Python does not support any long jump patterns so the preferred idiom for
+        collective write locks is the fencing pattern:
+
+        .. code-block:: python
+
+            controller = sync()
+            with controller.single_write() as fence:
+                # Kick out any processes that don't have to write
+                fence.guard()
+                # Perform writing operation on just 1 process
+                pass
+            # All kicked out processes resume code together outside of the with block.
+
+        :return: A fenced write lock.
+        """
         if rank is None:
             rank = self._master
-        fence = _Fence(self._rank == rank, self._comm)
+        fence = Fence(rank, self._rank == rank, self._comm)
         if self._rank == rank:
             return _WriteLock(
                 self._read_buffer,
@@ -152,21 +242,51 @@ class _WriteLock:
             self._fence._comm.Barrier()
 
 
-class _Fence:
-    def __init__(self, access, comm):
+class Fence:
+    """
+    Can be used to fence off pieces of code from processes that shouldn't access it.
+    Additionally it can be used to share a resource to all processes that was created
+    within the fenced off code block using :method:`.Fence.share` and
+    :method:`.Fence.collect`.
+    """
+
+    def __init__(self, master, access, comm):
+        self._master = master
         self._access = access
         self._comm = comm
+        self._obj = None
 
     def guard(self):
+        """
+        Kicks out all MPI processes that do not have access to the fenced off code block.
+        Works only within a ``with`` statement or a ``try`` statement that catches
+        :class:`.FencedSignal` exceptions.
+        """
         if not self._access:
-            raise _FencedSignal()
+            raise FencedSignal()
+
+    def share(self, obj):
+        """
+        Put an object to share with all other MPI processes from within a fenced off code
+        block.
+        """
+        self._obj = obj
+
+    def collect(self):
+        """
+        Collect the object that was put to share within the fenced off code block.
+
+        :return: Shared object
+        :rtype: any
+        """
+        return self._comm.bcast(self._obj, root=self._master)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         self._comm.Barrier()
-        if exc_type is _FencedSignal:
+        if exc_type is FencedSignal:
             return True
 
 
@@ -181,8 +301,8 @@ class _NoHandle:
         self._comm.Barrier()
 
 
-class _FencedSignal(Exception):
+class FencedSignal(Exception):
     pass
 
 
-__all__ = ["sync", "WindowController"]
+__all__ = ["sync", "WindowController", "Fence", "FencedSignal"]
