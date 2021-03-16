@@ -1,4 +1,4 @@
-name: Build and test mpisync
+name: Build and test mpilock
 
 on: [push]
 
@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: [3.6, 3.7, 3.8, 3.9]
+        python-version: [3.7, 3.8, 3.9]
 
     steps:
     - uses: actions/checkout@v2
@@ -36,6 +36,5 @@ jobs:
         pip install -e .
     - name: Run tests & coverage
       run: |
-        coverage run -p -m unittest discover -v -s ./tests
-        mpiexec -n 4 coverage run -p -m unittest discover -v -s ./tests
+        mpiexec --oversubscribe -n 4 coverage run -p -m unittest discover -v -s ./tests
         bash <(curl -s https://codecov.io/bash)

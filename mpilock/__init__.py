@@ -1,11 +1,12 @@
 __author__ = "Robin De Schepper"
 __email__ = "robingilbert.deschepper@unipv.it"
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 import mpi4py.MPI as MPI
 import atexit
 import numpy as np, time
+
 
 def sync(comm=None, master=0):
     return WindowController(comm, master)
@@ -19,12 +20,20 @@ class WindowController:
         self._size = comm.Get_size()
         self._rank = comm.Get_rank()
         self._master = master
-        atexit.register(lambda: self.close())
 
         self._read_buffer = np.zeros(1, dtype=np.uint64)
         self._write_buffer = np.zeros(1, dtype=np.bool_)
         self._read_window = self._window(self._read_buffer)
         self._write_window = self._window(self._write_buffer)
+        atexit.register(lambda: self.close())
+
+    @property
+    def master(self):
+        return self._master
+
+    @property
+    def rank(self):
+        return self._rank
 
     def close(self):
         try:
@@ -40,18 +49,33 @@ class WindowController:
         return _ReadLock(self._read_buffer, self._write_window, self._master)
 
     def write(self):
-        return _WriteLock(self._read_buffer, self._read_window, self._size, self._write_window, self._master)
+        return _WriteLock(
+            self._read_buffer,
+            self._read_window,
+            self._size,
+            self._write_window,
+            self._master,
+        )
 
     def single_write(self, handle=None, rank=None):
         if rank is None:
             rank = self._master
         fence = _Fence(self._rank == rank, self._comm)
         if self._rank == rank:
-            return _WriteLock(self._read_buffer, self._read_window, self._size, self._write_window, self._master, fence=fence, handle=handle)
+            return _WriteLock(
+                self._read_buffer,
+                self._read_window,
+                self._size,
+                self._write_window,
+                self._master,
+                fence=fence,
+                handle=handle,
+            )
         elif handle:
             return _NoHandle(self._comm)
         else:
             return fence
+
 
 class _ReadLock:
     def __init__(self, read_buffer, write_window, root):
@@ -71,7 +95,16 @@ class _ReadLock:
 
 
 class _WriteLock:
-    def __init__(self, read_buffer, read_window, size, write_window, root, fence=None, handle=None):
+    def __init__(
+        self,
+        read_buffer,
+        read_window,
+        size,
+        write_window,
+        root,
+        fence=None,
+        handle=None,
+    ):
         self._read_buffer = read_buffer
         self._read_window = read_window
         self._size = size
@@ -138,5 +171,6 @@ class _NoHandle:
 
 class _FencedSignal(Exception):
     pass
+
 
 __all__ = ["sync", "WindowController"]

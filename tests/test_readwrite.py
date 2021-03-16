@@ -1,9 +1,10 @@
 import unittest
-from mpisync import sync
+from mpilock import sync
 import time
 import mpi4py.MPI as mpi
 
 rank = mpi.COMM_WORLD.Get_rank()
+
 
 class TestLocking(unittest.TestCase):
     def setUp(self):
@@ -23,8 +24,9 @@ class TestLocking(unittest.TestCase):
         t = time.time()
         with self.controller.read():
             time.sleep(1)
-        self.assertAlmostEqual(1, time.time() - t, 2, "Concurrent read locks failed to run parallelly.")
-
+        self.assertAlmostEqual(
+            1, time.time() - t, 1, "Concurrent read locks failed to run parallelly."
+        )
 
     def test_single_read_lock(self):
         if rank == 1:
@@ -37,7 +39,12 @@ class TestLocking(unittest.TestCase):
         with c.write():
             time.sleep(0.1)
         c._comm.Barrier()
-        self.assertAlmostEqual(0.1 * c._comm.Get_size(), time.time() - t, 2, "Concurrent write locks failed to run serially.")
+        self.assertAlmostEqual(
+            0.1 * c._comm.Get_size(),
+            time.time() - t,
+            1,
+            "Concurrent write locks failed to run serially.",
+        )
 
     def test_collective_fence(self):
         spy = False
