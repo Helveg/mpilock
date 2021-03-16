@@ -20,12 +20,12 @@ class WindowController:
         self._size = comm.Get_size()
         self._rank = comm.Get_rank()
         self._master = master
-        atexit.register(lambda: self.close())
 
         self._read_buffer = np.zeros(1, dtype=np.uint64)
         self._write_buffer = np.zeros(1, dtype=np.bool_)
         self._read_window = self._window(self._read_buffer)
         self._write_window = self._window(self._write_buffer)
+        atexit.register(lambda: self.close())
 
     def close(self):
         try:
