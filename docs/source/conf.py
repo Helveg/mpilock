@@ -17,7 +17,7 @@
 
 # -- Project information -----------------------------------------------------
 
-project = 'mpisync'
+project = 'mpilock'
 copyright = '2021, Robin De Schepper'
 author = 'Robin De Schepper'
 

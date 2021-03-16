@@ -1,9 +1,9 @@
-.. mpisync documentation master file, created by
+.. mpilock documentation master file, created by
    sphinx-quickstart on Wed Feb 17 16:13:15 2021.
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to mpisync's documentation!
+Welcome to mpilock's documentation!
 ===================================
 
 .. toctree::

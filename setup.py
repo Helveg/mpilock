@@ -7,7 +7,7 @@ from setuptools import find_packages, setup
 
 requires = ["mpi4py>=3.0.3", "numpy>=1.20.0"]
 
-with open("mpisync/__init__.py", "r") as f:
+with open("mpilock/__init__.py", "r") as f:
     for line in f.readlines():
         if "__version__ = " in line:
             exec(line.strip())
@@ -19,7 +19,7 @@ with open("README.md") as f:
     long_description = f.read()
 
 setup(
-    name="mpisync",
+    name="mpilock",
     version=__version__,
     description="Synchronize read/write access to resources shared between MPI processes.",
     long_description=long_description,

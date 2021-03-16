@@ -1,4 +1,4 @@
-name: Build and test mpisync
+name: Build and test mpilock
 
 on: [push]
 

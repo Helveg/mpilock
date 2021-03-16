@@ -1,5 +1,5 @@
 import unittest
-from mpisync import sync
+from mpilock import sync
 import time
 import mpi4py.MPI as mpi
 

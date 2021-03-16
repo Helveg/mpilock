@@ -1,4 +1,4 @@
-name: Upload mpisync package
+name: Upload mpilock package
 
 on:
   release:
