@@ -25,7 +25,7 @@ class TestLocking(unittest.TestCase):
         with self.controller.read():
             time.sleep(1)
         self.assertAlmostEqual(
-            1, time.time() - t, 2, "Concurrent read locks failed to run parallelly."
+            1, time.time() - t, 1, "Concurrent read locks failed to run parallelly."
         )
 
     def test_single_read_lock(self):
@@ -42,7 +42,7 @@ class TestLocking(unittest.TestCase):
         self.assertAlmostEqual(
             0.1 * c._comm.Get_size(),
             time.time() - t,
-            2,
+            1,
             "Concurrent write locks failed to run serially.",
         )
 
