@@ -26,6 +26,7 @@ class WindowController:
         self._read_window = self._window(self._read_buffer)
         self._write_window = self._window(self._write_buffer)
         atexit.register(lambda: self.close())
+        self._closed = False
 
     @property
     def master(self):
@@ -35,12 +36,23 @@ class WindowController:
     def rank(self):
         return self._rank
 
+    @property
+    def closed(self):
+        return self._closed
+
     def close(self):
         try:
             self._read_window.Free()
             self._write_window.Free()
         except MPI.Exception:
             pass
+        self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
 
     def _window(self, buffer):
         return MPI.Win.Create(buffer, True, MPI.INFO_NULL, self._comm)

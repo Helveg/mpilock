@@ -15,6 +15,11 @@ class TestLocking(unittest.TestCase):
         self.controller.close()
         self.controller._comm.Barrier()
 
+    def test_controller_context(self):
+        with self.controller as ctrl:
+            self.assertEqual(self.controller, ctrl, "context return value")
+        self.assertTrue(self.controller.closed, "context didn't close controller")
+
     def test_single_read_lock(self):
         if rank == 1:
             with self.controller.read():
