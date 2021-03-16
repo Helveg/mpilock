@@ -128,7 +128,7 @@ class WindowController:
 
         Keep in mind that if you run this code on multiple processes at the same time that
         they will write one by one, but they will still all write eventually. If only one
-        of the nodes needs to perform the writing operation see :method:`.WindowController.single_write`
+        of the nodes needs to perform the writing operation see :meth:`.WindowController.single_write`
 
         :return: An unfenced write lock
         """
@@ -162,7 +162,7 @@ class WindowController:
         """
         if rank is None:
             rank = self._master
-        fence = _Fence(self._rank == rank, self._comm)
+        fence = Fence(rank, self._rank == rank, self._comm)
         if self._rank == rank:
             return _WriteLock(
                 self._read_buffer,
@@ -242,21 +242,51 @@ class _WriteLock:
             self._fence._comm.Barrier()
 
 
-class _Fence:
-    def __init__(self, access, comm):
+class Fence:
+    """
+    Can be used to fence off pieces of code from processes that shouldn't access it.
+    Additionally it can be used to share a resource to all processes that was created
+    within the fenced off code block using :meth:`.Fence.share` and
+    :meth:`.Fence.collect`.
+    """
+
+    def __init__(self, master, access, comm):
+        self._master = master
         self._access = access
         self._comm = comm
+        self._obj = None
 
     def guard(self):
+        """
+        Kicks out all MPI processes that do not have access to the fenced off code block.
+        Works only within a ``with`` statement or a ``try`` statement that catches
+        :class:`.FencedSignal` exceptions.
+        """
         if not self._access:
-            raise _FencedSignal()
+            raise FencedSignal()
+
+    def share(self, obj):
+        """
+        Put an object to share with all other MPI processes from within a fenced off code
+        block.
+        """
+        self._obj = obj
+
+    def collect(self):
+        """
+        Collect the object that was put to share within the fenced off code block.
+
+        :return: Shared object
+        :rtype: any
+        """
+        return self._comm.bcast(self._obj, root=self._master)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         self._comm.Barrier()
-        if exc_type is _FencedSignal:
+        if exc_type is FencedSignal:
             return True
 
 
@@ -271,8 +301,8 @@ class _NoHandle:
         self._comm.Barrier()
 
 
-class _FencedSignal(Exception):
+class FencedSignal(Exception):
     pass
 
 
-__all__ = ["sync", "WindowController"]
+__all__ = ["sync", "WindowController", "Fence", "FencedSignal"]

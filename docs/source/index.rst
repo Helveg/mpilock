@@ -15,8 +15,8 @@ About
 
 ``mpilock`` offers a :class:`mpilock.WindowController` class with a high-level API
 for parallel access to resources. The :class:`mpilock.WindowController` can be used
-to perform :method:`~mpilock.WindowController.read`, :method:`mpilock.WindowController.write`
-or :method:`mpilock.WindowController.single_write`.
+to perform :meth:`~mpilock.WindowController.read`, :meth:`mpilock.WindowController.write`
+or :meth:`mpilock.WindowController.single_write`.
 
 Read operations happen in parallel while write operations will lock the
 resource and prevent any new read or write operations and will wait for
