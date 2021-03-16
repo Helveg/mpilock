@@ -1,7 +1,7 @@
 __author__ = "Robin De Schepper"
 __email__ = "robingilbert.deschepper@unipv.it"
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 import mpi4py.MPI as MPI
 import atexit
@@ -26,6 +26,14 @@ class WindowController:
         self._read_window = self._window(self._read_buffer)
         self._write_window = self._window(self._write_buffer)
         atexit.register(lambda: self.close())
+
+    @property
+    def master(self):
+        return self._master
+
+    @property
+    def rank(self):
+        return self._rank
 
     def close(self):
         try:

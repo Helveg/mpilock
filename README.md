@@ -1,50 +1,50 @@
-[![Documentation Status](https://readthedocs.org/projects/zwembad/badge/?version=latest)](https://zwembad.readthedocs.io/en/latest/?badge=latest)
+[![codecov](https://codecov.io/gh/Helveg/mpilock/branch/main/graph/badge.svg?token=WQ1U6UNPGA)](https://codecov.io/gh/Helveg/mpilock)
 
 # About
 
-`zwembad` offers an `MPIPoolExecutor` class, an implementation of the
-`concurrent.futures.Executor` class of the standard library.
+`mpilock` offers a `WindowController` class with a high-level API for parallel access to
+resources. The `WindowController` can be used to perform `read`, `write` or `single_write`.
+
+Read operations happen in parallel while write operations will lock the resource and
+prevent any new read or write operations and will wait for all existing read operations to
+finish. After the write operation completes the lock is released and other operations can
+resume.
+
+The `WindowController` does not contain any logic to control the resources, it only locks
+and synchronizes the MPI processes. Once the operation permission is obtained it's up to
+the user to perform the reading/writing to the resources.
+
+The `sync` method is a factory for `WindowController`s and can simplify creation of
+`WindowController`s.
 
 # Example usage
 
 ```
-from zwembad import MPIPoolExecutor
-from mpi4py import MPI
+from mpilock import sync
+from h5py import File
 
-def menial_task(x):
-  return x ** MPI.COMM_WORLD.Get_rank()
+# Create a default WindowController on `COMM_WORLD` with the master on rank 0
+lock = sync()
 
-with MPIPoolExecutor() as pool:
-  pool.workers_exit()
-  print("Only the master executes this code.")
+# Fencing is the preferred idiom to fence anyone that isn't writing out of
+# the writer's code block, and afterwards share a resource
+with lock.single_write() as fence:
+  # Makes anyone without access long jump to the end of the with statement
+  fence.guard()
+  resource = h5py.File("hello.world", "w")
+  # Put a resource to be collected by other processes
+  fence.share(resource)
+resource = fence.collect()
 
-  # Submit some tasks to the pool
-  fs = [pool.submit(menial_task, i) for i in range(100)]
-
-  # Wait for all of the results and print them
-  print([f.result() for f in fs])
-
-  # A shorter notation to dispatch the same function with different args
-  # and to wait for all results is the `.map` method:
-  results = pool.map(menial_task, range(100))
-
-print("All processes join again here.")
-```
-
-You'll see that some results will have exponentiated either by 1, 2, ..., n
-depending on which worker they were sent to. It's also important to prevent your
-workers from running the master code using the `pool.workers_exit()` call. As a
-fail safe any attribute access on the `pool` object made from workers will
-result in them exiting anyway.
-
-The `MPIPoolExecutor` of zwembad is designed to function without `MPI.Spawn()`
-for cases where this approach isn't feasible, like supercomputers where
-`MPI.Spawn` is deliberatly not implemented (for example CrayMPI).
-
-Therefor the pool can only use MPI processes that are spawned when the MPI world
-is initialised and must be run from the command line using an MPI helper such as
-`mpirun`, `mpiexec` or SLURM's `srun`:
-
-```
-$ mpirun -n 4 python example.py
+try:
+  # Acquire a parallel read lock, guarantees noone writes while you're reading.
+  with lock.read():
+    data = resource["/my_data"][()]
+  # Acquire a write lock, will block all reading and writing.
+  with lock.write():
+    resource.create_dataset(lock.rank, data=data)
+finally:
+  with lock.single_write() as fence:
+    fence.guard()
+    resource.close()
 ```
