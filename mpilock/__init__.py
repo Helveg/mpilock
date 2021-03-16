@@ -1,7 +1,7 @@
 __author__ = "Robin De Schepper"
 __email__ = "robingilbert.deschepper@unipv.it"
 
-__version__ = "0.0.2"
+__version__ = "1.0.0"
 
 import mpi4py.MPI as MPI
 import atexit
