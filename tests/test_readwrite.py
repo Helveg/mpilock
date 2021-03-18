@@ -21,7 +21,7 @@ class TestLocking(unittest.TestCase):
         self.assertTrue(self.controller.closed, "context didn't close controller")
 
     def test_single_read_lock(self):
-        if rank == 1:
+        if rank == 0:
             with self.controller.read():
                 pass
 
@@ -33,8 +33,8 @@ class TestLocking(unittest.TestCase):
             1, time.time() - t, 1, "Concurrent read locks failed to run parallelly."
         )
 
-    def test_single_read_lock(self):
-        if rank == 1:
+    def test_single_write_lock(self):
+        if rank == 0:
             with self.controller.write():
                 pass
 
