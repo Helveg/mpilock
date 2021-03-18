@@ -44,7 +44,7 @@ class WindowController:
         self._rank = comm.Get_rank()
         self._master = master
 
-        self._read_buffer = np.zeros(1, dtype=np.bool)
+        self._read_buffer = np.zeros(1, dtype=np.bool_)
         self._write_buffer = np.zeros(1, dtype=np.bool_)
         self._read_window = self._window(self._read_buffer)
         self._write_window = self._window(self._write_buffer)
@@ -237,7 +237,7 @@ class _WriteLock:
         self._write_window.Lock(0)
         self._read_buffer[0] = 0
         self._read_window.Lock_all()
-        all_read = [np.zeros(1, dtype=np.bool) for _ in range(self._size)]
+        all_read = [np.zeros(1, dtype=np.bool_) for _ in range(self._size)]
         while True:
             for i in range(self._size):
                 self._read_window.Get([all_read[i], MPI.BOOL], i)
