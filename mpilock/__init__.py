@@ -1,7 +1,7 @@
 __author__ = "Robin De Schepper"
 __email__ = "robingilbert.deschepper@unipv.it"
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 import mpi4py.MPI as MPI
 import atexit
@@ -44,7 +44,7 @@ class WindowController:
         self._rank = comm.Get_rank()
         self._master = master
 
-        self._read_buffer = np.zeros(1, dtype=np.uint64)
+        self._read_buffer = np.zeros(1, dtype=np.bool)
         self._write_buffer = np.zeros(1, dtype=np.bool_)
         self._read_window = self._window(self._read_buffer)
         self._write_window = self._window(self._write_buffer)
@@ -91,6 +91,8 @@ class WindowController:
         self.close()
 
     def _window(self, buffer):
+        if self._comm.Get_size() == 1:
+            return _WindowMock(buffer)
         return MPI.Win.Create(buffer, True, MPI.INFO_NULL, self._comm)
 
     def read(self):
@@ -179,6 +181,18 @@ class WindowController:
             return fence
 
 
+class _WindowMock:
+    def __init__(self, buffer):
+        self._buffer = buffer
+
+        def noop(*args, **kwargs):
+            pass
+
+        noops = ["Free", "Get", "Lock", "Lock_all", "Unlock", "Unlock_all"]
+        for n in noops:
+            setattr(self, n, noop)
+
+
 class _ReadLock:
     def __init__(self, read_buffer, write_window, root):
         self._read_buffer = read_buffer
@@ -223,7 +237,7 @@ class _WriteLock:
         self._write_window.Lock(0)
         self._read_buffer[0] = 0
         self._read_window.Lock_all()
-        all_read = [np.zeros(1, dtype=np.uint64) for _ in range(self._size)]
+        all_read = [np.zeros(1, dtype=np.bool) for _ in range(self._size)]
         while True:
             for i in range(self._size):
                 self._read_window.Get([all_read[i], MPI.BOOL], i)
