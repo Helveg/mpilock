@@ -34,7 +34,7 @@ class TestLocking(unittest.TestCase):
         )
 
     def test_single_read_lock(self):
-        if rank == 1:
+        if rank == 0:
             with self.controller.write():
                 pass
 
