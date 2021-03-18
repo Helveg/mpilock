@@ -4,8 +4,11 @@ __email__ = "robingilbert.deschepper@unipv.it"
 __version__ = "1.0.1"
 
 import mpi4py.MPI as MPI
+import sys
+import time
 import atexit
-import numpy as np, time
+import warnings
+import numpy as np
 
 
 def sync(comm=None, master=0):
@@ -44,8 +47,8 @@ class WindowController:
         self._rank = comm.Get_rank()
         self._master = master
 
-        self._read_buffer = np.zeros(1, dtype=np.bool_)
-        self._write_buffer = np.zeros(1, dtype=np.bool_)
+        self._read_buffer = np.zeros(1, dtype=np.uint64)
+        self._write_buffer = np.zeros(1, dtype=np.uint64)
         self._read_window = self._window(self._read_buffer)
         self._write_window = self._window(self._write_buffer)
         atexit.register(lambda: self.close())
@@ -112,7 +115,9 @@ class WindowController:
 
         :return: A read lock
         """
-        return _ReadLock(self._read_buffer, self._write_window, self._master)
+        return _ReadLock(
+            self._read_buffer, self._write_buffer, self._write_window, self._master
+        )
 
     def write(self):
         """
@@ -138,6 +143,7 @@ class WindowController:
             self._read_buffer,
             self._read_window,
             self._size,
+            self._write_buffer,
             self._write_window,
             self._master,
         )
@@ -170,6 +176,7 @@ class WindowController:
                 self._read_buffer,
                 self._read_window,
                 self._size,
+                self._write_buffer,
                 self._write_window,
                 self._master,
                 fence=fence,
@@ -194,20 +201,38 @@ class _WindowMock:
 
 
 class _ReadLock:
-    def __init__(self, read_buffer, write_window, root):
+    def __init__(self, read_buffer, write_buffer, write_window, root):
         self._read_buffer = read_buffer
         self._write_window = write_window
+        self._write_buffer = write_buffer
         self._root = root
 
     def __enter__(self):
+        if self.locked():
+            self._nested_read_lock()
+        else:
+            self._read_lock()
+
+    def locked(self):
+        print("checking read lock", self._read_buffer[0], self._write_buffer[0])
+        return self._read_buffer[0] != 0 or self._write_buffer[0] != 0
+
+    def _read_lock(self):
         # Wait for the write lock to be available before starting your read operation
+        print("acquiring hard read lock")
         self._write_window.Lock(self._root)
-        self._read_buffer[0] = True
+        self._read_buffer[0] = 1
         self._write_window.Unlock(self._root)
+
+    def _nested_read_lock(self):
+        # Wait for the write lock to be available before starting your read operation
+        self._read_buffer[0] += 1
+        print("nesting read lock", self._read_buffer[0])
 
     def __exit__(self, exc_type, exc_value, traceback):
         # Stop read operation any time
-        self._read_buffer[0] = False
+        self._read_buffer[0] -= 1
+        print("relaxing read lock", self._read_buffer[0])
 
 
 class _WriteLock:
@@ -216,6 +241,7 @@ class _WriteLock:
         read_buffer,
         read_window,
         size,
+        write_buffer,
         write_window,
         root,
         fence=None,
@@ -224,36 +250,69 @@ class _WriteLock:
         self._read_buffer = read_buffer
         self._read_window = read_window
         self._size = size
+        self._write_buffer = write_buffer
         self._write_window = write_window
         self._root = root
         self._fence = fence
         self._handle = handle
 
+    def locked(self):
+        print("checking write lock", MPI.COMM_WORLD.Get_rank(), self._write_buffer[0])
+        return self._write_buffer[0] != 0
+
     def __enter__(self):
+        if self.locked():
+            print("nesting write lock", MPI.COMM_WORLD.Get_rank())
+            return self._nested_write_lock()
+        else:
+            print("acquiring write lock", MPI.COMM_WORLD.Get_rank())
+            return self._acquire_lock()
+
+    def _acquire_lock(self):
         # A write lock can be opened on top of a read lock, but if our read
         # flag is `True` we'll be deadlocked waiting for it to be unset, so we
         # save our read state, unset it and instead restore it later.
         reading = self._read_buffer[0]
         self._write_window.Lock(0)
+        print("locked write window", MPI.COMM_WORLD.Get_rank())
         self._read_buffer[0] = 0
         self._read_window.Lock_all()
-        all_read = [np.zeros(1, dtype=np.bool_) for _ in range(self._size)]
+        all_read = [np.zeros(1, dtype=np.uint64) for _ in range(self._size)]
         while True:
             for i in range(self._size):
                 self._read_window.Get([all_read[i], MPI.BOOL], i)
             if sum(all_read)[0] == 0:
                 break
         self._read_buffer[0] = reading
+        self._write_buffer[0] = 1
+        print("acquired write lock", MPI.COMM_WORLD.Get_rank(), self._write_buffer[0])
         self._read_window.Unlock_all()
         if self._handle is not None:
             return self._handle
         elif self._fence is not None:
             return self._fence
 
+    def _nested_write_lock(self):
+        self._write_buffer[0] += 1
+        print("nesting write lock", self._write_buffer[0])
+        if self._handle is not None:
+            return self._handle
+        elif self._fence is not None:
+            return self._fence
+
     def __exit__(self, exc_type, exc_value, traceback):
-        self._write_window.Unlock(0)
-        if self._fence is not None:
-            self._fence._comm.Barrier()
+        self._write_buffer[0] -= 1
+        print("relaxing write lock", self._write_buffer[0])
+        if exc_type is not None:
+            warnings.warn(
+                "Exception during write lock. Deadlock might occur if you collect."
+            )
+        if not self.locked():
+            print("releasing write lock")
+            self._write_window.Unlock(0)
+            if self._fence is not None:
+                self._fence._comm.Barrier()
+                sys.stderr.flush()
 
 
 class Fence:
