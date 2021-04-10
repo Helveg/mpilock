@@ -1,7 +1,7 @@
 __author__ = "Robin De Schepper"
 __email__ = "robingilbert.deschepper@unipv.it"
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 import mpi4py.MPI as MPI
 import sys
@@ -214,12 +214,10 @@ class _ReadLock:
             self._read_lock()
 
     def locked(self):
-        print("checking read lock", self._read_buffer[0], self._write_buffer[0])
         return self._read_buffer[0] != 0 or self._write_buffer[0] != 0
 
     def _read_lock(self):
         # Wait for the write lock to be available before starting your read operation
-        print("acquiring hard read lock")
         self._write_window.Lock(self._root)
         self._read_buffer[0] = 1
         self._write_window.Unlock(self._root)
@@ -227,12 +225,10 @@ class _ReadLock:
     def _nested_read_lock(self):
         # Wait for the write lock to be available before starting your read operation
         self._read_buffer[0] += 1
-        print("nesting read lock", self._read_buffer[0])
 
     def __exit__(self, exc_type, exc_value, traceback):
         # Stop read operation any time
         self._read_buffer[0] -= 1
-        print("relaxing read lock", self._read_buffer[0])
 
 
 class _WriteLock:
@@ -257,25 +253,20 @@ class _WriteLock:
         self._handle = handle
 
     def locked(self):
-        print("checking write lock", MPI.COMM_WORLD.Get_rank(), self._write_buffer[0])
         return self._write_buffer[0] != 0
 
     def __enter__(self):
         if self.locked():
-            print("nesting write lock", MPI.COMM_WORLD.Get_rank())
             return self._nested_write_lock()
         else:
-            print("acquiring write lock", MPI.COMM_WORLD.Get_rank())
             return self._acquire_lock()
 
     def _acquire_lock(self):
-        # A write lock can be opened on top of a read lock, but if our read
-        # flag is `True` we'll be deadlocked waiting for it to be unset, so we
-        # save our read state, unset it and instead restore it later.
+        # We unset our read flag as we're waiting for the write lock and won't
+        # be reading as we wait. Nested deadlocks otherwise occur.
         reading = self._read_buffer[0]
-        self._write_window.Lock(0)
-        print("locked write window", MPI.COMM_WORLD.Get_rank())
         self._read_buffer[0] = 0
+        self._write_window.Lock(0)
         self._read_window.Lock_all()
         all_read = [np.zeros(1, dtype=np.uint64) for _ in range(self._size)]
         while True:
@@ -285,7 +276,6 @@ class _WriteLock:
                 break
         self._read_buffer[0] = reading
         self._write_buffer[0] = 1
-        print("acquired write lock", MPI.COMM_WORLD.Get_rank(), self._write_buffer[0])
         self._read_window.Unlock_all()
         if self._handle is not None:
             return self._handle
@@ -294,7 +284,6 @@ class _WriteLock:
 
     def _nested_write_lock(self):
         self._write_buffer[0] += 1
-        print("nesting write lock", self._write_buffer[0])
         if self._handle is not None:
             return self._handle
         elif self._fence is not None:
@@ -302,13 +291,11 @@ class _WriteLock:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self._write_buffer[0] -= 1
-        print("relaxing write lock", self._write_buffer[0])
         if exc_type is not None:
             warnings.warn(
                 "Exception during write lock. Deadlock might occur if you collect."
             )
         if not self.locked():
-            print("releasing write lock")
             self._write_window.Unlock(0)
             if self._fence is not None:
                 self._fence._comm.Barrier()
@@ -324,6 +311,16 @@ class Fence:
     """
 
     def __init__(self, master, access, comm):
+        """
+        Create a fence to guard code blocks from certain MPI processes within a try or
+        with statement.
+
+        :param master: MPI rank that controls the fence and any resource sharing.
+        :type master: int
+        :param access: May this MPI process enter the fenced off block?
+        :type access: bool
+        :param comm: MPI communicator for collective resource sharing.
+        """
         self._master = master
         self._access = access
         self._comm = comm

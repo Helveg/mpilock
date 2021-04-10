@@ -3,7 +3,8 @@
 # About
 
 `mpilock` offers a `WindowController` class with a high-level API for parallel access to
-resources. The `WindowController` can be used to perform `read`, `write` or `single_write`.
+resources. The `WindowController` can be used to synchronize MPI processes during `read`,
+`write` or `single_write` operations on shared resources.
 
 Read operations happen in parallel while write operations will lock the resource and
 prevent any new read or write operations and will wait for all existing read operations to
