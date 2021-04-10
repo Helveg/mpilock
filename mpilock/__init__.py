@@ -284,16 +284,16 @@ class _WriteLock:
 
     def _nested_write_lock(self):
         self._write_buffer[0] += 1
-        if self._handle is not None:
+        if self._handle is not None:  # pragma: nocover
             return self._handle
-        elif self._fence is not None:
+        elif self._fence is not None:  # pragma: nocover
             return self._fence
 
     def __exit__(self, exc_type, exc_value, traceback):
         self._write_buffer[0] -= 1
-        if exc_type is not None:
+        if exc_type is not None:  # pragma: nocover
             warnings.warn(
-                "Exception during write lock. Deadlock might occur if you collect."
+                "Exception during write lock. Deadlock might occur if you use `.collect`."
             )
         if not self.locked():
             self._write_window.Unlock(0)
