@@ -201,7 +201,7 @@ class _WindowMock:
         def noop(*args, **kwargs):
             pass
 
-        noops = ["Free", "Get", "Lock", "Lock_all", "Unlock", "Unlock_all"]
+        noops = ["Flush", "Flush_all", "Free", "Get", "Lock", "Lock_all", "Unlock", "Unlock_all"]
         for n in noops:
             setattr(self, n, noop)
 
@@ -234,6 +234,13 @@ class _ReadLock:
         # Wait for the write lock to be available before starting your read operation
         with _tracer.start_as_current_span("mpilock.read.wait", attributes={"mpi.rank": self._rank}):
             self._write_window.Lock(self._root)
+            # MPI_Win_lock may return before the exclusive lock is acquired.
+            # A Get on the locked window + Flush forces the runtime to actually
+            # hold the lock before we proceed — Get cannot complete until
+            # exclusion is granted, so Flush blocks until then.
+            _dummy = np.zeros(1, dtype=np.uint64)
+            self._write_window.Get([_dummy, MPI.UINT64_T], self._root)
+            self._write_window.Flush(self._root)
         self._read_buffer[0] = 1
         self._write_window.Unlock(self._root)
 
@@ -294,10 +301,18 @@ class _WriteLock:
         all_read = [np.zeros(1, dtype=np.uint64) for _ in range(self._size)]
         with _tracer.start_as_current_span("mpilock.write.wait", attributes={"mpi.rank": self._rank}):
             self._write_window.Lock(0)
+            # MPI_Win_lock may return before the exclusive lock is acquired.
+            # A Get on the locked window + Flush forces the runtime to actually
+            # hold the lock before we proceed — Get cannot complete until
+            # exclusion is granted, so Flush blocks until then.
+            _dummy = np.zeros(1, dtype=np.uint64)
+            self._write_window.Get([_dummy, MPI.UINT64_T], 0)
+            self._write_window.Flush(0)
             self._read_window.Lock_all()
             while True:
                 for i in range(self._size):
                     self._read_window.Get([all_read[i], MPI.BOOL], i)
+                self._read_window.Flush_all()
                 if sum(all_read)[0] == 0:
                     break
         self._read_buffer[0] = reading
