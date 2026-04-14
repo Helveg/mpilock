@@ -9,6 +9,9 @@ import time
 import atexit
 import warnings
 import numpy as np
+from opentelemetry import trace as _otel_trace
+
+_tracer = _otel_trace.get_tracer("mpilock", __version__)
 
 
 def sync(comm=None, master=0):
@@ -116,7 +119,8 @@ class WindowController:
         :return: A read lock
         """
         return _ReadLock(
-            self._read_buffer, self._write_buffer, self._write_window, self._master
+            self._read_buffer, self._write_buffer, self._write_window, self._master,
+            self._rank,
         )
 
     def write(self):
@@ -146,6 +150,7 @@ class WindowController:
             self._write_buffer,
             self._write_window,
             self._master,
+            self._rank,
         )
 
     def single_write(self, handle=None, rank=None):
@@ -179,6 +184,7 @@ class WindowController:
                 self._write_buffer,
                 self._write_window,
                 self._master,
+                self._rank,
                 fence=fence,
                 handle=handle,
             )
@@ -201,14 +207,22 @@ class _WindowMock:
 
 
 class _ReadLock:
-    def __init__(self, read_buffer, write_buffer, write_window, root):
+    def __init__(self, read_buffer, write_buffer, write_window, root, rank=0):
         self._read_buffer = read_buffer
         self._write_window = write_window
         self._write_buffer = write_buffer
         self._root = root
+        self._rank = rank
 
     def __enter__(self):
-        if self.locked():
+        nested = self.locked()
+        cm = _tracer.start_as_current_span(
+            "mpilock.read",
+            attributes={"mpi.rank": self._rank, "mpi.master": self._root, "mpilock.nested": nested},
+        )
+        self._otel_span_ctx = cm
+        cm.__enter__()
+        if nested:
             self._nested_read_lock()
         else:
             self._read_lock()
@@ -218,7 +232,8 @@ class _ReadLock:
 
     def _read_lock(self):
         # Wait for the write lock to be available before starting your read operation
-        self._write_window.Lock(self._root)
+        with _tracer.start_as_current_span("mpilock.read.wait", attributes={"mpi.rank": self._rank}):
+            self._write_window.Lock(self._root)
         self._read_buffer[0] = 1
         self._write_window.Unlock(self._root)
 
@@ -229,6 +244,7 @@ class _ReadLock:
     def __exit__(self, exc_type, exc_value, traceback):
         # Stop read operation any time
         self._read_buffer[0] -= 1
+        self._otel_span_ctx.__exit__(exc_type, exc_value, traceback)
 
 
 class _WriteLock:
@@ -240,6 +256,7 @@ class _WriteLock:
         write_buffer,
         write_window,
         root,
+        rank=0,
         fence=None,
         handle=None,
     ):
@@ -249,6 +266,7 @@ class _WriteLock:
         self._write_buffer = write_buffer
         self._write_window = write_window
         self._root = root
+        self._rank = rank
         self._fence = fence
         self._handle = handle
 
@@ -256,7 +274,14 @@ class _WriteLock:
         return self._write_buffer[0] != 0
 
     def __enter__(self):
-        if self.locked():
+        nested = self.locked()
+        cm = _tracer.start_as_current_span(
+            "mpilock.write",
+            attributes={"mpi.rank": self._rank, "mpi.master": self._root, "mpilock.nested": nested},
+        )
+        self._otel_span_ctx = cm
+        cm.__enter__()
+        if nested:
             return self._nested_write_lock()
         else:
             return self._acquire_lock()
@@ -266,14 +291,15 @@ class _WriteLock:
         # be reading as we wait. Nested deadlocks otherwise occur.
         reading = self._read_buffer[0]
         self._read_buffer[0] = 0
-        self._write_window.Lock(0)
-        self._read_window.Lock_all()
         all_read = [np.zeros(1, dtype=np.uint64) for _ in range(self._size)]
-        while True:
-            for i in range(self._size):
-                self._read_window.Get([all_read[i], MPI.BOOL], i)
-            if sum(all_read)[0] == 0:
-                break
+        with _tracer.start_as_current_span("mpilock.write.wait", attributes={"mpi.rank": self._rank}):
+            self._write_window.Lock(0)
+            self._read_window.Lock_all()
+            while True:
+                for i in range(self._size):
+                    self._read_window.Get([all_read[i], MPI.BOOL], i)
+                if sum(all_read)[0] == 0:
+                    break
         self._read_buffer[0] = reading
         self._write_buffer[0] = 1
         self._read_window.Unlock_all()
@@ -300,6 +326,7 @@ class _WriteLock:
             if self._fence is not None:
                 self._fence._comm.Barrier()
                 sys.stderr.flush()
+        self._otel_span_ctx.__exit__(exc_type, exc_value, traceback)
 
 
 class Fence:
