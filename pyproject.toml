@@ -7,13 +7,13 @@ name = "mpilock"
 dynamic = ["version"]
 description = "Synchronize read/write access to resources shared between MPI processes."
 readme = "README.md"
-license = {text = "BSD"}
-authors = [{name = "Robin De Schepper", email = "robingilbert.deschepper@unipv.it"}]
+license = { text = "BSD" }
+authors = [{ name = "Robin De Schepper", email = "robingilbert.deschepper@unipv.it" }]
 requires-python = ">=3.6"
 keywords = ["mpi", "pool", "mpipool", "zwembad"]
 dependencies = [
-    "numpy>=1.20.0",
-    "mpi4py>=3.0.3",
+    "numpy>=2.0.0",
+    "mpi4py>=3.0.0",
     "opentelemetry-api>=1.0.0",
 ]
 classifiers = [
