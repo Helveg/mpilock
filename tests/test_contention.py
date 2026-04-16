@@ -41,6 +41,7 @@ _multi_rank = unittest.skipIf(size < 2, "requires at least 2 MPI ranks")
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _broadcast_tmpfile(comm):
     """Rank 0 creates a temp .npy file; all ranks receive its path."""
     tmpfile = None
@@ -61,6 +62,7 @@ def _remove_tmpfile(tmpfile, comm):
 # ---------------------------------------------------------------------------
 # Read / write mutual exclusion
 # ---------------------------------------------------------------------------
+
 
 class TestReadWriteContention(unittest.TestCase):
     """Write locks must block reads, reads must block writes, and concurrent
@@ -83,7 +85,7 @@ class TestReadWriteContention(unittest.TestCase):
             with c.write():
                 time.sleep(0.4)
         else:
-            time.sleep(0.05)          # let rank 0 acquire the write lock first
+            time.sleep(0.05)  # let rank 0 acquire the write lock first
             t = time.time()
             with c.read():
                 pass
@@ -91,8 +93,7 @@ class TestReadWriteContention(unittest.TestCase):
         c._comm.Barrier()
         if rank != 0:
             self.assertGreater(
-                elapsed, 0.3,
-                "Read lock was acquired while a write lock was still held"
+                elapsed, 0.3, "Read lock was acquired while a write lock was still held"
             )
 
     @_multi_rank
@@ -104,7 +105,7 @@ class TestReadWriteContention(unittest.TestCase):
             with c.read():
                 time.sleep(0.4)
         else:
-            time.sleep(0.05)          # let rank 0 acquire the read lock first
+            time.sleep(0.05)  # let rank 0 acquire the read lock first
             t = time.time()
             with c.write():
                 pass
@@ -112,26 +113,32 @@ class TestReadWriteContention(unittest.TestCase):
         c._comm.Barrier()
         if rank != 0:
             self.assertGreater(
-                elapsed, 0.3,
-                "Write lock was acquired while a read lock was still held"
+                elapsed, 0.3, "Write lock was acquired while a read lock was still held"
             )
 
     @_multi_rank
     def test_concurrent_reads_not_serialized(self):
         """Multiple ranks holding read locks simultaneously must not block each other."""
+        from mpi4py import MPI
+
         c = self.c
-        # All ranks take a read lock and sleep for 0.4 s.  If reads were
-        # serialized the total would be 0.4 * size; concurrently it is ~0.4 s.
+        # All ranks take a read lock and sleep for 4 s. If reads were
+        # serialized the total would be 4 * size; concurrently it is ~4 s.
         t = time.time()
         with c.read():
-            time.sleep(0.4)
+            for i in range(1000):
+                MPI.COMM_WORLD.Iprobe()
+                time.sleep(0.004)
         elapsed = time.time() - t
         c._comm.Barrier()
         self.assertLess(
-            elapsed, 0.4 * size,
-            "Read locks appear to have serialized — concurrent reads are blocked"
+            elapsed,
+            4 * size,
+            "Read locks appear to have serialized — concurrent reads are blocked",
         )
-        self.assertAlmostEqual(0.4, elapsed, 1, "Concurrent reads took unexpectedly long")
+        self.assertAlmostEqual(
+            4.0, elapsed, delta=0.5, msg="Concurrent reads took unexpectedly long"
+        )
 
     @_multi_rank
     def test_reads_run_concurrently_after_write_releases(self):
@@ -142,10 +149,10 @@ class TestReadWriteContention(unittest.TestCase):
             with c.write():
                 time.sleep(0.4)
         else:
-            time.sleep(0.05)          # queue up while write is active
+            time.sleep(0.05)  # queue up while write is active
             t = time.time()
             with c.read():
-                time.sleep(0.3)       # all non-0 ranks sleep concurrently
+                time.sleep(0.3)  # all non-0 ranks sleep concurrently
             elapsed = time.time() - t
         c._comm.Barrier()
         if rank != 0:
@@ -153,14 +160,16 @@ class TestReadWriteContention(unittest.TestCase):
             # If reads were serialized, elapsed would grow with (size - 1).
             self.assertGreater(elapsed, 0.55, "Read did not wait for write to finish")
             self.assertLess(
-                elapsed, 0.35 + 0.3 + 0.3,   # generous for slow machines
-                "Post-write reads were serialized instead of running concurrently"
+                elapsed,
+                0.35 + 0.3 + 0.3,  # generous for slow machines
+                "Post-write reads were serialized instead of running concurrently",
             )
 
 
 # ---------------------------------------------------------------------------
 # Data-integrity under concurrent access
 # ---------------------------------------------------------------------------
+
 
 class TestDataIntegrity(unittest.TestCase):
     """Lock semantics must prevent observable data races on shared state."""
@@ -194,8 +203,9 @@ class TestDataIntegrity(unittest.TestCase):
         expected = size * iterations
         _remove_tmpfile(tmpfile, c._comm)
         self.assertEqual(
-            expected, result,
-            f"Lost-update race detected: expected counter={expected}, got {result}"
+            expected,
+            result,
+            f"Lost-update race detected: expected counter={expected}, got {result}",
         )
 
     @_multi_rank
@@ -214,7 +224,7 @@ class TestDataIntegrity(unittest.TestCase):
             arr = np.load(tmpfile)
             arr[rank] = rank + 1
             np.save(tmpfile, arr)
-            time.sleep(0.05)          # hold the lock while sleeping
+            time.sleep(0.05)  # hold the lock while sleeping
             arr_now = np.load(tmpfile)
             was_clobbered = int(arr_now[rank]) != rank + 1
         c._comm.Barrier()
@@ -224,12 +234,13 @@ class TestDataIntegrity(unittest.TestCase):
 
         self.assertFalse(
             was_clobbered,
-            "Shared file was modified by another rank while we held the write lock"
+            "Shared file was modified by another rank while we held the write lock",
         )
         for r in range(size):
             self.assertEqual(
-                r + 1, int(final[r]),
-                f"Rank {r}'s write was lost or corrupted in the final state"
+                r + 1,
+                int(final[r]),
+                f"Rank {r}'s write was lost or corrupted in the final state",
             )
 
     @_multi_rank
@@ -245,7 +256,7 @@ class TestDataIntegrity(unittest.TestCase):
         for _ in range(iterations):
             if rank % 2 == 0:
                 with c.read():
-                    np.load(tmpfile)   # read-only; value not asserted here
+                    np.load(tmpfile)  # read-only; value not asserted here
             else:
                 with c.write():
                     val = np.load(tmpfile)
@@ -258,14 +269,16 @@ class TestDataIntegrity(unittest.TestCase):
         result = int(np.load(tmpfile)[0])
         _remove_tmpfile(tmpfile, c._comm)
         self.assertEqual(
-            expected, result,
-            f"Mixed workload: expected {expected} increments, got {result}"
+            expected,
+            result,
+            f"Mixed workload: expected {expected} increments, got {result}",
         )
 
 
 # ---------------------------------------------------------------------------
 # Nested locks under contention
 # ---------------------------------------------------------------------------
+
 
 class TestNestedUnderContention(unittest.TestCase):
     """Nested lock combinations must not deadlock when other ranks compete."""
@@ -298,8 +311,9 @@ class TestNestedUnderContention(unittest.TestCase):
         c._comm.Barrier()
         if rank != 0:
             self.assertGreater(
-                elapsed, 0.2,
-                "Competing write acquired lock before nested write+read completed"
+                elapsed,
+                0.2,
+                "Competing write acquired lock before nested write+read completed",
             )
 
     @_multi_rank
@@ -320,8 +334,9 @@ class TestNestedUnderContention(unittest.TestCase):
         c._comm.Barrier()
         if rank != 0:
             self.assertGreater(
-                elapsed, 0.2,
-                "Competing read acquired lock before nested read+write completed"
+                elapsed,
+                0.2,
+                "Competing read acquired lock before nested read+write completed",
             )
 
     @_multi_rank
@@ -343,14 +358,16 @@ class TestNestedUnderContention(unittest.TestCase):
         c._comm.Barrier()
         if rank != 0:
             self.assertGreater(
-                elapsed, 0.2,
-                "Write acquired lock before deeply nested sequence completed"
+                elapsed,
+                0.2,
+                "Write acquired lock before deeply nested sequence completed",
             )
 
 
 # ---------------------------------------------------------------------------
 # Stress tests
 # ---------------------------------------------------------------------------
+
 
 class TestStressLocking(unittest.TestCase):
     """High-frequency and mixed-pattern lock cycling must stay deadlock-free."""
@@ -418,6 +435,7 @@ class TestStressLocking(unittest.TestCase):
         expected = size * (iterations // 4)
         _remove_tmpfile(tmpfile, c._comm)
         self.assertEqual(
-            expected, result,
-            f"Stress integrity: expected {expected} increments, got {result}"
+            expected,
+            result,
+            f"Stress integrity: expected {expected} increments, got {result}",
         )

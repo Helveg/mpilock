@@ -1,6 +1,5 @@
 import unittest
 from mpilock import sync
-import time
 import mpi4py.MPI as mpi
 
 rank = mpi.COMM_WORLD.Get_rank()
@@ -27,9 +26,7 @@ class TestNestedLocks(unittest.TestCase):
 
     def test_read_write(self):
         with self.controller.read() as ctrl:
-            # print("Reading", rank)
             with self.controller.write() as ctrl:
-                # print("Nested", rank)
                 pass
 
     def test_write_read(self):

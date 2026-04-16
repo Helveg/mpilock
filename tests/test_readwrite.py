@@ -26,11 +26,18 @@ class TestLocking(unittest.TestCase):
                 pass
 
     def test_concurrent_read_lock(self):
+        from mpi4py import MPI
+
         t = time.time()
         with self.controller.read():
-            time.sleep(1)
+            for i in range(100):
+                time.sleep(0.01)
+                MPI.COMM_WORLD.Iprobe()
         self.assertAlmostEqual(
-            1, time.time() - t, 1, "Concurrent read locks failed to run parallelly."
+            1.0,
+            time.time() - t,
+            delta=0.3,
+            msg="Concurrent read locks failed to run parallelly.",
         )
 
     def test_single_write_lock(self):

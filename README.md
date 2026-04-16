@@ -6,13 +6,25 @@
 resources. The `WindowController` can be used to synchronize MPI processes during `read`,
 `write` or `single_write` operations on shared resources.
 
-Read operations happen in parallel while write operations will lock the resource and
-prevent any new read or write operations and will wait for all existing read operations to
-finish. After the write operation completes the lock is released and other operations can
+Read operations happen in parallel while write operations will lock the resource,
+prevent any new read or write operations, and will wait for all existing read operations to
+finish. After the write operation completes, the lock is released and other operations can
 resume.
 
+> [!IMPORTANT]
+>
+> One of the MPI ranks involved will need to act as the root. Under some conditions, for some
+> MPI implementations, whenever the root rank acquires a read lock, others may not be able to
+> acquire a read or write lock in parallel. This applies to you if:
+>   * The root rank acquires read locks
+>   * You use an affected MPI implementation
+>   * Your root rank does not perform MPI operations while it holds the read lock.
+>
+> A solution to this is to frequently call an MPI noop like `Iprobe()` from the root rank while
+> it holds the read lock.
+
 The `WindowController` does not contain any logic to control the resources, it only locks
-and synchronizes the MPI processes. Once the operation permission is obtained it's up to
+and synchronizes the MPI processes. Once the operation permission is obtained, it's up to
 the user to perform the reading/writing to the resources.
 
 The `sync` method is a factory for `WindowController`s and can simplify creation of
@@ -30,24 +42,24 @@ ctrl = sync()
 # Fencing is the preferred idiom to fence anyone that isn't writing out of
 # the writer's code block, and afterwards share a resource
 with ctrl.single_write() as fence:
-  # Makes anyone without access long jump to the end of the with statement
-  fence.guard()
-  resource = h5py.File("hello.world", "w")
-  # Put a resource to be collected by other processes
-  fence.share(resource)
+    # Makes anyone without access long jump to the end of the with statement
+    fence.guard()
+    resource = h5py.File("hello.world", "w")
+    # Put a resource to be collected by other processes
+    fence.share(resource)
 resource = fence.collect()
 
 try:
-  # Acquire a parallel read lock, guarantees noone writes while you're reading.
-  with ctrl.read():
-    data = resource["/my_data"][()]
-  # Acquire a write lock, will block all reading and writing.
-  with ctrl.write():
-    resource.create_dataset(lock.rank, data=data)
+    # Acquire a parallel read lock, guarantees noone writes while you're reading.
+    with ctrl.read():
+        data = resource["/my_data"][()]
+    # Acquire a write lock, will block all reading and writing.
+    with ctrl.write():
+        resource.create_dataset(lock.rank, data=data)
 finally:
-  with ctrl.single_write() as fence:
-    fence.guard()
-    resource.close()
+    with ctrl.single_write() as fence:
+        fence.guard()
+        resource.close()
 
 # The window controller itself needs to be closed as well (is done atexit)
 ctrl.close()
