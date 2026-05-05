@@ -8,8 +8,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v4
     - name: Black Check
-      uses: jpetrucciani/black-check@20.8b1
+      uses: psf/black@stable
       with:
-        path: 'mpilock'
+        src: 'mpilock'
