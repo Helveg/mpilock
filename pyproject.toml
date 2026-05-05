@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "BSD" }
 authors = [{ name = "Robin De Schepper", email = "robingilbert.deschepper@unipv.it" }]
 requires-python = ">=3.6"
-keywords = ["mpi", "pool", "mpipool", "zwembad"]
+keywords = ["mpi", "pool"]
 dependencies = [
     "numpy>=1.20.0",
     "mpi4py>=3.0.0",
@@ -30,4 +30,4 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Helveg/zwembad"
+Homepage = "https://github.com/Helveg/mpilock"
