@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "BSD" }
 authors = [{ name = "Robin De Schepper", email = "robingilbert.deschepper@unipv.it" }]
 requires-python = ">=3.6"
-keywords = ["mpi", "pool"]
+keywords = ["mpi", "pool", "lock", "synchronization"]
 dependencies = [
     "numpy>=1.20.0",
     "mpi4py>=3.0.0",
