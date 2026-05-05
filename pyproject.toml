@@ -9,7 +9,7 @@ description = "Synchronize read/write access to resources shared between MPI pro
 readme = "README.md"
 license = { text = "BSD" }
 authors = [{ name = "Robin De Schepper", email = "robingilbert.deschepper@unipv.it" }]
-requires-python = ">=3.6"
+requires-python = ">=3.10"
 keywords = ["mpi", "pool", "lock", "synchronization"]
 dependencies = [
     "numpy>=1.20.0",
@@ -23,10 +23,10 @@ classifiers = [
     "Topic :: Scientific/Engineering",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.6",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 
 [project.urls]
