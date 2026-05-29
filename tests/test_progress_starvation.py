@@ -8,9 +8,9 @@ operations, lock acquisition must therefore still complete promptly.
 
 A design where a writer polls every rank's read flag (``Flush_all`` over all
 ranks) instead stalls until the compute-bound ranks next re-enter MPI, so its
-acquisition time scales with the off-MPI compute. These tests pin acquisition
-time well below the compute window, so they fail on such a design and pass on the
-centralized-master one.
+acquisition time scales with the off-MPI compute. These tests bound acquisition
+time far below the seconds-to-tens-of-seconds stall such a design exhibits at
+scale, so they fail on it and pass on the centralized-master one.
 
 The stall only manifests on an MPI setup where passive-target RMA depends on the
 target making progress (network RMA, multi-node, no async progress thread; e.g.
@@ -128,9 +128,16 @@ class TestProgressStarvation(unittest.TestCase):
             max_acq = max(max_acq, time.perf_counter() - t)
         global_max = c._comm.allreduce(max_acq, op=mpi.MAX)
         c._comm.Barrier()
+        # A starved design (per-rank polling, or no/weak pump) makes acquisition scale
+        # with the off-MPI compute and the rank count: seconds to tens of seconds on
+        # g100. The centralized master with a real-RMA progress pump keeps it well under
+        # a second even with the master itself compute-bound (its pump thread fights the
+        # GIL), so a sub-second bound passes the fix yet fails every starved variant.
+        bound = 1.0
         self.assertLess(
             global_max,
-            compute_s * 0.5,
-            f"Lock acquisition scaled with off-MPI compute "
-            f"(worst acquire {global_max:.2f}s, compute chunk {compute_s}s).",
+            bound,
+            f"Lock acquisition is not bounded under off-MPI compute "
+            f"(worst acquire {global_max:.2f}s, bound {bound}s, compute chunk "
+            f"{compute_s}s): the master's progress pump is not clearing acquisitions.",
         )

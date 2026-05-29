@@ -77,8 +77,11 @@ class WindowController:
         # window. The buffers on non-master ranks are unused; all RMA targets the master.
         self._count_buffer = np.zeros(1, dtype=np.int64)
         self._write_buffer = np.zeros(1, dtype=np.uint64)
+        # A private window the master's progress pump operates on; touched by no one else.
+        self._pump_buffer = np.zeros(1, dtype=np.uint64)
         self._count_window = self._window(self._count_buffer)
         self._write_window = self._window(self._write_buffer)
+        self._pump_window = self._window(self._pump_buffer)
         # Re-entrant locks are tracked locally; only the outermost lock touches the master.
         self._read_depth = 0
         self._write_depth = 0
@@ -98,12 +101,23 @@ class WindowController:
     def _pump(self):
         # Keep the MPI progress engine turning so passive-target RMA from other ranks
         # against the master's windows (lock acquires and releases) completes while this
-        # rank's main thread is busy with non-MPI work.
+        # rank's main thread is busy with non-MPI work. A bare Iprobe drives the engine
+        # too weakly to clear many concurrent acquisitions; a real RMA op (lock + get +
+        # flush + unlock) on a private window pushes it hard enough that they complete
+        # promptly. The window is owned by this pump alone, so locking it never contends
+        # with the lock protocol's own windows.
         comm = self._comm
         stop = self._pump_stop
         interval = self._pump_interval
+        m = self._master
+        pw = self._pump_window
+        dummy = np.zeros(1, dtype=np.uint64)
         while not stop.is_set():
             try:
+                pw.Lock(m, MPI.LOCK_SHARED)
+                pw.Get([dummy, MPI.UINT64_T], m)
+                pw.Flush(m)
+                pw.Unlock(m)
                 comm.Iprobe(MPI.ANY_SOURCE, MPI.ANY_TAG)
             except Exception:
                 break
@@ -145,6 +159,7 @@ class WindowController:
         try:
             self._count_window.Free()
             self._write_window.Free()
+            self._pump_window.Free()
         except MPI.Exception:
             pass
 
