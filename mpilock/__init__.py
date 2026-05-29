@@ -4,6 +4,7 @@ __email__ = "robingilbert.deschepper@unipv.it"
 __version__ = "2.0.0"
 
 import mpi4py.MPI as MPI
+import os
 import sys
 import time
 import atexit
@@ -15,7 +16,7 @@ from opentelemetry import trace as _otel_trace
 _tracer = _otel_trace.get_tracer("mpilock", __version__)
 
 
-def sync(comm=None, master=0, pump=True, pump_interval=1e-4):
+def sync(comm=None, master=0, pump=None, pump_interval=1e-4):
     """
     Create a :class:`.WindowController` that synchronizes read write operations across all
     MPI processes in the communicator.
@@ -30,7 +31,10 @@ def sync(comm=None, master=0, pump=True, pump_interval=1e-4):
       engine turning, so lock operations issued by other ranks (which target the master's
       windows by passive-target RMA) complete even while the master's main thread is busy
       with non-MPI work. Requires the MPI runtime to be initialized with
-      ``MPI_THREAD_MULTIPLE``. Only the master rank starts a thread.
+      ``MPI_THREAD_MULTIPLE``. Only the master rank starts a thread. Defaults to the
+      ``MPILOCK_PUMP`` environment variable (on unless set to ``"0"``). Disable it when
+      the runtime lacks ``MPI_THREAD_MULTIPLE`` and the master is kept responsive by other
+      means.
     :type pump: bool
     :param pump_interval: Seconds the master's progress pump sleeps between MPI calls.
     :type pump_interval: float
@@ -59,7 +63,9 @@ class WindowController:
     master would stall every other rank's lock operations.
     """
 
-    def __init__(self, comm=None, master=0, pump=True, pump_interval=1e-4):
+    def __init__(self, comm=None, master=0, pump=None, pump_interval=1e-4):
+        if pump is None:
+            pump = os.environ.get("MPILOCK_PUMP", "1") != "0"
         if comm is None:
             comm = MPI.COMM_WORLD
         self._comm = comm

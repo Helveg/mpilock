@@ -12,10 +12,25 @@ acquisition time scales with the off-MPI compute. These tests pin acquisition
 time well below the compute window, so they fail on such a design and pass on the
 centralized-master one.
 
-Run with:
+The stall only manifests on an MPI setup where passive-target RMA depends on the
+target making progress (network RMA, multi-node, no async progress thread; e.g.
+CINECA g100). On a single-node, shared-memory MPI it does not appear, so these
+tests pass on old and new code alike there. To reproduce it on a single node with
+OpenMPI, force RMA over point-to-point (which needs target progress) and a thread
+level it supports:
+
+    OMPI_MCA_osc=pt2pt MPI4PY_RC_THREAD_LEVEL=single MPILOCK_PUMP=0 \\
+        mpiexec --oversubscribe -n 4 python -m unittest tests/test_progress_starvation.py
+
+Under that env the writer test fails on the old design and passes on the new one
+(the master stays responsive, so centralizing state on it is enough). The pump
+test needs MPI_THREAD_MULTIPLE (which pt2pt lacks), so it is skipped there.
+
+Run normally with:
     mpiexec --oversubscribe -n 4 python -m unittest tests/test_progress_starvation.py
 """
 
+import os
 import time
 import unittest
 
@@ -25,6 +40,12 @@ from mpilock import sync
 
 rank = mpi.COMM_WORLD.Get_rank()
 size = mpi.COMM_WORLD.Get_size()
+
+# The pump-dependent test only makes sense where the progress pump can actually run.
+_pump_capable = (
+    mpi.Query_thread() == mpi.THREAD_MULTIPLE
+    and os.environ.get("MPILOCK_PUMP", "1") != "0"
+)
 
 
 def _busy_until(t_end):
@@ -81,9 +102,13 @@ class TestProgressStarvation(unittest.TestCase):
         )
 
     @unittest.skipIf(size < 2, "requires at least 2 MPI ranks")
+    @unittest.skipUnless(
+        _pump_capable, "needs the progress pump (MPI_THREAD_MULTIPLE and MPILOCK_PUMP)"
+    )
     def test_acquisition_bounded_under_offmpi_compute(self):
         """With every rank doing a chunk of non-MPI compute between lock operations,
-        acquisition must stay far below the compute-chunk duration."""
+        acquisition must stay far below the compute-chunk duration. Unlike the writer
+        test, no rank stays responsive here, so this relies on the master's pump."""
         c = self.c
         compute_s = 0.5
         iters = 6
