@@ -34,9 +34,18 @@ jobs:
         pip install wheel coverage
         pip install -e . --prefer-binary
     - name: Run tests & coverage
+      env:
+        PYTHONFAULTHANDLER: "1"
       run: |
+        # Dump tracebacks of all threads on SIGTERM, so the `timeout` wrapper
+        # produces a diagnosis (one stack per rank) rather than only an exit code.
+        cat > "$RUNNER_TEMP/sitecustomize.py" <<'PY'
+        import faulthandler, signal
+        faulthandler.enable()
+        faulthandler.register(signal.SIGTERM)
+        PY
+        export PYTHONPATH="$RUNNER_TEMP:${PYTHONPATH:-}"
         # Serial tests
-        coverage run -p -m unittest discover -v -s ./tests
+        timeout --kill-after=10 90 coverage run -p -m unittest discover -v -s ./tests
         # Parallel tests
-        mpiexec --oversubscribe -n 4 coverage run -p -m unittest discover -v -s ./tests
-        bash <(curl -s https://codecov.io/bash)
+        timeout --kill-after=10 120 mpiexec --oversubscribe -n 4 coverage run -p -m unittest discover -v -s ./tests
