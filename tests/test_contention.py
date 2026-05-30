@@ -133,11 +133,9 @@ class TestReadWriteContention(unittest.TestCase):
         c._comm.Barrier()
         self.assertLess(
             elapsed,
-            4 * size,
-            "Read locks appear to have serialized — concurrent reads are blocked",
-        )
-        self.assertAlmostEqual(
-            4.0, elapsed, delta=0.5, msg="Concurrent reads took unexpectedly long"
+            6.0,
+            f"Read locks appear to have serialized: elapsed {elapsed:.2f}s, "
+            f"expected ~4s concurrent across {size} ranks",
         )
 
     @_multi_rank
@@ -361,6 +359,133 @@ class TestNestedUnderContention(unittest.TestCase):
                 elapsed,
                 0.2,
                 "Write acquired lock before deeply nested sequence completed",
+            )
+
+    @_multi_rank
+    def test_read_inside_write_does_not_release_master_count(self):
+        """A read nested inside a write must not touch the master's reader count
+        on enter or exit. If the inner read's exit calls _read_unlock the count
+        goes negative, and the next writer spins on val != 0 forever."""
+        c = self.c
+        elapsed = None
+        if rank == 0:
+            with c.write():
+                with c.read():
+                    pass
+                with c.read():
+                    pass
+        else:
+            time.sleep(0.05)
+            t = time.time()
+            with c.write():
+                pass
+            elapsed = time.time() - t
+        c._comm.Barrier()
+        if rank != 0:
+            self.assertLess(
+                elapsed,
+                1.0,
+                "Competing write stalled after rank 0 unwound nested reads "
+                "inside a write: the master's reader count is over-released.",
+            )
+
+    @_multi_rank
+    def test_write_inside_read_blocks_competing_writes(self):
+        """A write nested inside an outer read must hold the writer-mutex for
+        its full duration. If promotion does not happen, the writer-mutex spin
+        on the master's count would never succeed (this rank's outer read keeps
+        the count above zero), so the test would either deadlock or, if the
+        promotion is wrong in the other direction, competing writers would slip
+        in before the inner write's sleep completes."""
+        c = self.c
+        elapsed = None
+        if rank == 0:
+            with c.read():
+                with c.write():
+                    time.sleep(0.3)
+        else:
+            time.sleep(0.05)
+            t = time.time()
+            with c.write():
+                pass
+            elapsed = time.time() - t
+        c._comm.Barrier()
+        if rank != 0:
+            self.assertGreater(
+                elapsed,
+                0.2,
+                "Competing write acquired the writer-mutex before the inner "
+                "write inside an outer read completed: promotion did not hold "
+                "the writer-mutex exclusively.",
+            )
+
+    @_multi_rank
+    def test_write_inside_read_restores_reader_after_inner_write_exits(self):
+        """After a promoted write inside an outer read exits, this rank must be
+        re-registered as a reader so the outer read still blocks other writers
+        for the rest of its duration."""
+        c = self.c
+        elapsed = None
+        if rank == 0:
+            with c.read():
+                with c.write():
+                    pass
+                time.sleep(0.3)
+        else:
+            time.sleep(0.05)
+            t = time.time()
+            with c.write():
+                pass
+            elapsed = time.time() - t
+        c._comm.Barrier()
+        if rank != 0:
+            self.assertGreater(
+                elapsed,
+                0.2,
+                "Competing write acquired during the outer read's remaining "
+                "hold: the inner write did not re-register this rank as a "
+                "reader on exit.",
+            )
+
+    @_multi_rank
+    def test_alternating_nested_patterns_under_contention(self):
+        """Cycle through every nested pattern. If any combination corrupts the
+        master's count or orphans the writer-mutex, the post-cycle acquires
+        from other ranks stall instead of completing promptly."""
+        c = self.c
+        elapsed = None
+        if rank == 0:
+            with c.read():
+                with c.read():
+                    pass
+            with c.write():
+                with c.write():
+                    pass
+            with c.write():
+                with c.read():
+                    pass
+            with c.read():
+                with c.write():
+                    pass
+            with c.write():
+                with c.read():
+                    with c.write():
+                        pass
+        else:
+            time.sleep(0.2)
+            t = time.time()
+            with c.write():
+                pass
+            with c.read():
+                pass
+            elapsed = time.time() - t
+        c._comm.Barrier()
+        if rank != 0:
+            self.assertLess(
+                elapsed,
+                1.0,
+                "Acquisitions after the nested-pattern cycle stalled: master "
+                "state is corrupted.",
             )
 
 

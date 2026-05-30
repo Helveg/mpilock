@@ -1,0 +1,48 @@
+name: Progress-starvation regression
+
+# The passive-target progress starvation only manifests on an MPI setup where RMA
+# depends on the target making progress. A default single-node runner uses
+# shared-memory RMA and never exhibits it, so the regular test job cannot catch a
+# regression. This job forces RMA over point-to-point (which needs target progress)
+# at a thread level it supports, with the progress pump disabled, so the writer test
+# reproduces the stall: it passes on the centralized-master design and fails if the
+# lock goes back to polling every rank.
+
+on: [push, pull_request]
+
+jobs:
+  forced-pt2pt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install OpenMPI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openmpi-bin libopenmpi-dev
+      - name: Install dependencies and self
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+      - name: Progress-starvation regression (forced point-to-point RMA)
+        env:
+          OMPI_MCA_osc: pt2pt
+          MPI4PY_RC_THREAD_LEVEL: single
+          MPILOCK_PUMP: "0"
+        run: |
+          # mpiexec on some builds returns 0 even when a rank's process exits non-zero,
+          # so gate on the unittest output rather than the exit code: fail if any rank
+          # reports FAILED, or if no rank reports OK.
+          out=$(mpiexec --oversubscribe -n 4 python -m unittest discover -v \
+            -s ./tests -p "test_progress_starvation.py" 2>&1) || true
+          echo "$out"
+          if echo "$out" | grep -q "FAILED"; then
+            echo "::error::progress-starvation regression failed (lock acquisition starved)"
+            exit 1
+          fi
+          if ! echo "$out" | grep -qE "^OK"; then
+            echo "::error::progress-starvation tests did not report OK"
+            exit 1
+          fi

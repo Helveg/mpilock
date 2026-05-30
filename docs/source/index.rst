@@ -10,6 +10,8 @@ Welcome to mpilock's documentation!
    :maxdepth: 2
    :caption: Contents:
 
+   concepts
+
 About
 -----
 

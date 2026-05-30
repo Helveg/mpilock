@@ -1,12 +1,14 @@
 __author__ = "Robin De Schepper"
 __email__ = "robingilbert.deschepper@unipv.it"
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 import mpi4py.MPI as MPI
+import os
 import sys
 import time
 import atexit
+import threading
 import warnings
 import numpy as np
 from opentelemetry import trace as _otel_trace
@@ -14,21 +16,33 @@ from opentelemetry import trace as _otel_trace
 _tracer = _otel_trace.get_tracer("mpilock", __version__)
 
 
-def sync(comm=None, master=0):
+def sync(comm=None, master=0, pump=None, pump_interval=1e-4):
     """
     Create a :class:`.WindowController` that synchronizes read write operations across all
     MPI processes in the communicator.
 
     :param comm: MPI communicator
     :type comm: :class:`mpi4py.MPI.Communicator`
-    :param master: Rank of the master of the communicator, will be picked whenever
-      something needs to be organized or decided by a single node in the communicator.
-    :type comm: int
+    :param master: Rank of the master of the communicator. All lock state lives in the
+      master's MPI windows, so every acquire and release only ever needs cooperation
+      from the master, never from the other (possibly busy) ranks.
+    :type master: int
+    :param pump: Run a background daemon thread on the master that keeps the MPI progress
+      engine turning, so lock operations issued by other ranks (which target the master's
+      windows by passive-target RMA) complete even while the master's main thread is busy
+      with non-MPI work. Requires the MPI runtime to be initialized with
+      ``MPI_THREAD_MULTIPLE``. Only the master rank starts a thread. Defaults to the
+      ``MPILOCK_PUMP`` environment variable (on unless set to ``"0"``). Disable it when
+      the runtime lacks ``MPI_THREAD_MULTIPLE`` and the master is kept responsive by other
+      means.
+    :type pump: bool
+    :param pump_interval: Seconds the master's progress pump sleeps between MPI calls.
+    :type pump_interval: float
 
     :return: A controller
     :rtype: :class:`.WindowController`
     """
-    return WindowController(comm, master)
+    return WindowController(comm, master, pump=pump, pump_interval=pump_interval)
 
 
 class WindowController:
@@ -40,9 +54,18 @@ class WindowController:
     aware of each other's operations and a write lock will never be granted if other
     read or write operations are ongoing, while read locks may be granted while other read
     operations are ongoing, but not if any write locks are acquired or being requested.
+
+    All lock state is centralized in the master rank's windows: a writer mutex window and
+    a reader-count window. Acquiring or releasing any lock therefore only requires the
+    master to make MPI progress, never the other ranks. Passive-target RMA only advances
+    while the target is inside MPI, so the master runs a small daemon thread that keeps its
+    progress engine turning (see the ``pump`` argument of :func:`.sync`); otherwise a busy
+    master would stall every other rank's lock operations.
     """
 
-    def __init__(self, comm=None, master=0):
+    def __init__(self, comm=None, master=0, pump=None, pump_interval=1e-4):
+        if pump is None:
+            pump = os.environ.get("MPILOCK_PUMP", "1") != "0"
         if comm is None:
             comm = MPI.COMM_WORLD
         self._comm = comm
@@ -50,12 +73,64 @@ class WindowController:
         self._rank = comm.Get_rank()
         self._master = master
 
-        self._read_buffer = np.zeros(1, dtype=np.uint64)
+        # Reader count (lives canonically in the master's window) and the writer mutex
+        # window. The buffers on non-master ranks are unused; all RMA targets the master.
+        self._count_buffer = np.zeros(1, dtype=np.int64)
         self._write_buffer = np.zeros(1, dtype=np.uint64)
-        self._read_window = self._window(self._read_buffer)
+        # A private window the master's progress pump operates on; touched by no one else.
+        self._pump_buffer = np.zeros(1, dtype=np.uint64)
+        self._count_window = self._window(self._count_buffer)
         self._write_window = self._window(self._write_buffer)
-        atexit.register(lambda: self.close())
+        self._pump_window = self._window(self._pump_buffer)
+        # Re-entrant locks are tracked locally; only the outermost lock touches the master.
+        self._read_depth = 0
+        self._write_depth = 0
         self._closed = False
+
+        self._pump_interval = pump_interval
+        self._pump_thread = None
+        self._pump_stop = None
+        if pump and self._size > 1 and self._rank == self._master:
+            if MPI.Query_thread() == MPI.THREAD_MULTIPLE:
+                self._pump_stop = threading.Event()
+                self._pump_thread = threading.Thread(
+                    target=self._pump, name="mpilock-progress", daemon=True
+                )
+                self._pump_thread.start()
+            else:  # pragma: no cover
+                warnings.warn(
+                    "mpilock progress pump disabled: MPI runtime did not provide "
+                    "MPI_THREAD_MULTIPLE. Lock acquisitions will stall whenever the "
+                    "master is outside MPI. Initialize mpi4py with "
+                    "`mpi4py.rc.thread_level = 'multiple'` against a thread-multiple "
+                    "MPI build, or pass `pump=False` to silence this warning."
+                )
+        atexit.register(lambda: self.close())
+
+    def _pump(self):
+        # Keep the MPI progress engine turning so passive-target RMA from other ranks
+        # against the master's windows (lock acquires and releases) completes while this
+        # rank's main thread is busy with non-MPI work. A bare Iprobe drives the engine
+        # too weakly to clear many concurrent acquisitions; a real RMA op (lock + get +
+        # flush + unlock) on a private window pushes it hard enough that they complete
+        # promptly. The window is owned by this pump alone, so locking it never contends
+        # with the lock protocol's own windows.
+        comm = self._comm
+        stop = self._pump_stop
+        interval = self._pump_interval
+        m = self._master
+        pw = self._pump_window
+        dummy = np.zeros(1, dtype=np.uint64)
+        while not stop.is_set():
+            try:
+                pw.Lock(m, MPI.LOCK_SHARED)
+                pw.Get([dummy, MPI.UINT64_T], m)
+                pw.Flush(m)
+                pw.Unlock(m)
+                comm.Iprobe(MPI.ANY_SOURCE, MPI.ANY_TAG)
+            except Exception:  # pragma: no cover
+                break
+            time.sleep(interval)
 
     @property
     def master(self):
@@ -81,14 +156,21 @@ class WindowController:
 
     def close(self):
         """
-        Close the ``WindowController`` and its underlying MPI Windows.
+        Close the ``WindowController``, stop the progress pump, and free its MPI Windows.
         """
-        try:
-            self._read_window.Free()
-            self._write_window.Free()
-        except MPI.Exception:
-            pass
+        if self._closed:
+            return
         self._closed = True
+        if self._pump_thread is not None:
+            self._pump_stop.set()
+            self._pump_thread.join(timeout=1.0)
+            self._pump_thread = None
+        try:
+            self._count_window.Free()
+            self._write_window.Free()
+            self._pump_window.Free()
+        except MPI.Exception:  # pragma: no cover
+            pass
 
     def __enter__(self):
         return self
@@ -118,13 +200,7 @@ class WindowController:
 
         :return: A read lock
         """
-        return _ReadLock(
-            self._read_buffer,
-            self._write_buffer,
-            self._write_window,
-            self._master,
-            self._rank,
-        )
+        return _ReadLock(self)
 
     def write(self):
         """
@@ -146,15 +222,7 @@ class WindowController:
 
         :return: An unfenced write lock
         """
-        return _WriteLock(
-            self._read_buffer,
-            self._read_window,
-            self._size,
-            self._write_buffer,
-            self._write_window,
-            self._master,
-            self._rank,
-        )
+        return _WriteLock(self)
 
     def single_write(self, handle=None, rank=None):
         """
@@ -180,17 +248,7 @@ class WindowController:
             rank = self._master
         fence = Fence(rank, self._rank == rank, self._comm)
         if self._rank == rank:
-            return _WriteLock(
-                self._read_buffer,
-                self._read_window,
-                self._size,
-                self._write_buffer,
-                self._write_window,
-                self._master,
-                self._rank,
-                fence=fence,
-                handle=handle,
-            )
+            return _WriteLock(self, fence=fence, handle=handle)
         elif handle:
             return _NoHandle(self._comm)
         else:
@@ -205,6 +263,7 @@ class _WindowMock:
             pass
 
         noops = [
+            "Accumulate",
             "Flush",
             "Flush_all",
             "Free",
@@ -219,152 +278,201 @@ class _WindowMock:
 
 
 class _ReadLock:
-    def __init__(self, read_buffer, write_buffer, write_window, root, rank=0):
-        self._read_buffer = read_buffer
-        self._write_window = write_window
-        self._write_buffer = write_buffer
-        self._root = root
-        self._rank = rank
+    def __init__(self, controller):
+        self._ctrl = controller
 
     def __enter__(self):
-        nested = self.locked()
+        ctrl = self._ctrl
+        nested = ctrl._read_depth > 0 or ctrl._write_depth > 0
         cm = _tracer.start_as_current_span(
             "mpilock.read",
             attributes={
-                "mpi.rank": self._rank,
-                "mpi.master": self._root,
+                "mpi.rank": ctrl._rank,
+                "mpi.master": ctrl._master,
                 "mpilock.nested": nested,
             },
         )
         self._otel_span_ctx = cm
         cm.__enter__()
+        # This instance owns the MPI registration only if it was the outermost
+        # one; nested instances must not touch MPI on either enter or exit, or
+        # the master's reader count goes out of sync with the actual readers.
+        self._registered = not nested
         if nested:
-            self._nested_read_lock()
+            ctrl._read_depth += 1
         else:
             self._read_lock()
-
-    def locked(self):
-        return bool(self._read_buffer[0] != 0 or self._write_buffer[0] != 0)
+            ctrl._read_depth = 1
 
     def _read_lock(self):
-        # Wait for the write lock to be available before starting your read operation
+        ctrl = self._ctrl
+        w = ctrl._write_window
+        c = ctrl._count_window
+        m = ctrl._master
         with _tracer.start_as_current_span(
-            "mpilock.read.wait", attributes={"mpi.rank": self._rank}
+            "mpilock.read.wait", attributes={"mpi.rank": ctrl._rank}
         ):
-            self._write_window.Lock(self._root)
-            # MPI_Win_lock may return before the exclusive lock is acquired.
-            # A Get on the locked window + Flush forces the runtime to actually
-            # hold the lock before we proceed — Get cannot complete until
-            # exclusion is granted, so Flush blocks until then.
+            # Gate against writers: a writer holds this window exclusively for its whole
+            # critical section, so taking it here blocks while a write is in progress and
+            # gives writers priority.
+            w.Lock(m)
+            # MPI_Win_lock may return before the exclusive lock is acquired. A Get + Flush
+            # forces the runtime to actually hold the lock before we proceed.
             _dummy = np.zeros(1, dtype=np.uint64)
-            self._write_window.Get([_dummy, MPI.UINT64_T], self._root)
-            self._write_window.Flush(self._root)
-        self._read_buffer[0] = 1
-        self._write_window.Unlock(self._root)
-
-    def _nested_read_lock(self):
-        # Wait for the write lock to be available before starting your read operation
-        self._read_buffer[0] += 1
+            w.Get([_dummy, MPI.UINT64_T], m)
+            w.Flush(m)
+            # Register as an active reader by atomically bumping the master's count.
+            c.Lock(m, MPI.LOCK_SHARED)
+            one = np.ones(1, dtype=np.int64)
+            c.Accumulate([one, MPI.INT64_T], m, op=MPI.SUM)
+            c.Flush(m)
+            c.Unlock(m)
+            w.Unlock(m)
 
     def __exit__(self, exc_type, exc_value, traceback):
-        # Stop read operation any time
-        self._read_buffer[0] -= 1
+        ctrl = self._ctrl
+        ctrl._read_depth -= 1
+        if self._registered:
+            self._read_unlock()
         self._otel_span_ctx.__exit__(exc_type, exc_value, traceback)
+
+    def _read_unlock(self):
+        ctrl = self._ctrl
+        c = ctrl._count_window
+        m = ctrl._master
+        # Lockless decrement: the count lives in its own window, so a writer can hold the
+        # writer-mutex window and still observe this drop while it waits for readers to
+        # drain. A shared lock on the count window allows concurrent atomic accumulates.
+        c.Lock(m, MPI.LOCK_SHARED)
+        neg = np.array([-1], dtype=np.int64)
+        c.Accumulate([neg, MPI.INT64_T], m, op=MPI.SUM)
+        c.Flush(m)
+        c.Unlock(m)
 
 
 class _WriteLock:
-    def __init__(
-        self,
-        read_buffer,
-        read_window,
-        size,
-        write_buffer,
-        write_window,
-        root,
-        rank=0,
-        fence=None,
-        handle=None,
-    ):
-        self._read_buffer = read_buffer
-        self._read_window = read_window
-        self._size = size
-        self._write_buffer = write_buffer
-        self._write_window = write_window
-        self._root = root
-        self._rank = rank
+    def __init__(self, controller, fence=None, handle=None):
+        self._ctrl = controller
         self._fence = fence
         self._handle = handle
 
-    def locked(self):
-        return bool(self._write_buffer[0] != 0)
-
     def __enter__(self):
-        nested = self.locked()
+        ctrl = self._ctrl
+        in_write = ctrl._write_depth > 0
+        in_read = ctrl._read_depth > 0
+        # A write inside an outer read cannot just acquire: the outer read
+        # registered this rank as a reader, so the writer-mutex's spin on the
+        # master's count would never see zero. Promote: drop the read
+        # registration on enter, take the write exclusively, then re-register
+        # as a reader on exit so the outer `with c.read():` exits cleanly.
+        promoted = in_read and not in_write
         cm = _tracer.start_as_current_span(
             "mpilock.write",
             attributes={
-                "mpi.rank": self._rank,
-                "mpi.master": self._root,
-                "mpilock.nested": nested,
+                "mpi.rank": ctrl._rank,
+                "mpi.master": ctrl._master,
+                "mpilock.nested": in_write,
+                "mpilock.promoted": promoted,
             },
         )
         self._otel_span_ctx = cm
         cm.__enter__()
-        if nested:
+        # An instance only releases what it acquired: only the outer write (or a
+        # promoted write) holds the writer-mutex and must Unlock it on exit; only
+        # a promoted write needs to re-register as a reader on exit.
+        self._owns_window_lock = not in_write
+        self._promoted_from_read = promoted
+        if in_write:
             return self._nested_write_lock()
-        else:
-            return self._acquire_lock()
+        if promoted:
+            self._drop_reader_registration()
+        return self._acquire_lock()
 
     def _acquire_lock(self):
-        # We unset our read flag as we're waiting for the write lock and won't
-        # be reading as we wait. Nested deadlocks otherwise occur.
-        reading = self._read_buffer[0]
-        self._read_buffer[0] = 0
-        all_read = [np.zeros(1, dtype=np.uint64) for _ in range(self._size)]
+        ctrl = self._ctrl
+        w = ctrl._write_window
+        c = ctrl._count_window
+        m = ctrl._master
         with _tracer.start_as_current_span(
-            "mpilock.write.wait", attributes={"mpi.rank": self._rank}
+            "mpilock.write.wait", attributes={"mpi.rank": ctrl._rank}
         ):
-            self._write_window.Lock(self._root)
-            # MPI_Win_lock may return before the exclusive lock is acquired.
-            # A Get on the locked window + Flush forces the runtime to actually
-            # hold the lock before we proceed — Get cannot complete until
-            # exclusion is granted, so Flush blocks until then.
+            # Exclusive on the writer-mutex window: serializes writers and blocks new
+            # readers (they take this same window to register), giving writers priority.
+            # Held until __exit__.
+            w.Lock(m)
             _dummy = np.zeros(1, dtype=np.uint64)
-            self._write_window.Get([_dummy, MPI.UINT64_T], 0)
-            self._write_window.Flush(self._root)
-            self._read_window.Lock_all()
+            w.Get([_dummy, MPI.UINT64_T], m)
+            w.Flush(m)
+            # Wait for active readers to drain. We hold the writer mutex, so no new readers
+            # can register; readers only release (lockless decrement), so the count is
+            # monotonically non-increasing here and the spin is guaranteed to terminate.
+            c.Lock(m, MPI.LOCK_SHARED)
+            val = np.zeros(1, dtype=np.int64)
             while True:
-                for i in range(self._size):
-                    self._read_window.Get([all_read[i], MPI.BOOL], i)
-                self._read_window.Flush_all()
-                if sum(all_read)[0] == 0:
+                c.Get([val, MPI.INT64_T], m)
+                c.Flush(m)
+                if val[0] == 0:
                     break
-        self._read_buffer[0] = reading
-        self._write_buffer[0] = 1
-        self._read_window.Unlock_all()
+            c.Unlock(m)
+        ctrl._write_depth = 1
         if self._handle is not None:
             return self._handle
         elif self._fence is not None:
             return self._fence
 
     def _nested_write_lock(self):
-        self._write_buffer[0] += 1
+        self._ctrl._write_depth += 1
         if self._handle is not None:  # pragma: nocover
             return self._handle
         elif self._fence is not None:  # pragma: nocover
             return self._fence
 
+    def _drop_reader_registration(self):
+        # Mirror of _ReadLock._read_unlock: undo the outer reader's atomic
+        # increment on the master's count so the writer-mutex spin can drain.
+        ctrl = self._ctrl
+        c = ctrl._count_window
+        m = ctrl._master
+        c.Lock(m, MPI.LOCK_SHARED)
+        neg = np.array([-1], dtype=np.int64)
+        c.Accumulate([neg, MPI.INT64_T], m, op=MPI.SUM)
+        c.Flush(m)
+        c.Unlock(m)
+
+    def _restore_reader_registration(self):
+        # Mirror of _ReadLock._read_lock: re-register this rank as a reader so
+        # the outer read context can exit cleanly. The writer-mutex hand-off has
+        # to go through the same w.Lock(m) gate readers use, or a new reader
+        # could slip past during the race window.
+        ctrl = self._ctrl
+        w = ctrl._write_window
+        c = ctrl._count_window
+        m = ctrl._master
+        w.Lock(m)
+        _dummy = np.zeros(1, dtype=np.uint64)
+        w.Get([_dummy, MPI.UINT64_T], m)
+        w.Flush(m)
+        c.Lock(m, MPI.LOCK_SHARED)
+        one = np.ones(1, dtype=np.int64)
+        c.Accumulate([one, MPI.INT64_T], m, op=MPI.SUM)
+        c.Flush(m)
+        c.Unlock(m)
+        w.Unlock(m)
+
     def __exit__(self, exc_type, exc_value, traceback):
-        self._write_buffer[0] -= 1
+        ctrl = self._ctrl
+        ctrl._write_depth -= 1
         if exc_type is not None:  # pragma: nocover
             warnings.warn(
                 "Exception during write lock. Deadlock might occur if you use `.collect`."
             )
-        if not self.locked():
-            self._write_window.Unlock(0)
+        if self._owns_window_lock:
+            ctrl._write_window.Unlock(ctrl._master)
             if self._fence is not None:
                 self._fence._comm.Barrier()
                 sys.stderr.flush()
+        if self._promoted_from_read:
+            self._restore_reader_registration()
         self._otel_span_ctx.__exit__(exc_type, exc_value, traceback)
 
 
