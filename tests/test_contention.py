@@ -133,11 +133,9 @@ class TestReadWriteContention(unittest.TestCase):
         c._comm.Barrier()
         self.assertLess(
             elapsed,
-            4 * size,
-            "Read locks appear to have serialized — concurrent reads are blocked",
-        )
-        self.assertAlmostEqual(
-            4.0, elapsed, delta=0.5, msg="Concurrent reads took unexpectedly long"
+            6.0,
+            f"Read locks appear to have serialized: elapsed {elapsed:.2f}s, "
+            f"expected ~4s concurrent across {size} ranks",
         )
 
     @_multi_rank

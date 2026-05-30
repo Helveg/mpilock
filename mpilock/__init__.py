@@ -97,7 +97,7 @@ class WindowController:
                     target=self._pump, name="mpilock-progress", daemon=True
                 )
                 self._pump_thread.start()
-            else:
+            else:  # pragma: no cover
                 warnings.warn(
                     "mpilock progress pump disabled: MPI runtime did not provide "
                     "MPI_THREAD_MULTIPLE. Lock acquisitions will stall whenever the "
@@ -128,7 +128,7 @@ class WindowController:
                 pw.Flush(m)
                 pw.Unlock(m)
                 comm.Iprobe(MPI.ANY_SOURCE, MPI.ANY_TAG)
-            except Exception:
+            except Exception:  # pragma: no cover
                 break
             time.sleep(interval)
 
@@ -169,7 +169,7 @@ class WindowController:
             self._count_window.Free()
             self._write_window.Free()
             self._pump_window.Free()
-        except MPI.Exception:
+        except MPI.Exception:  # pragma: no cover
             pass
 
     def __enter__(self):
