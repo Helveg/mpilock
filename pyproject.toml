@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Synchronize read/write access to resources shared between MPI processes."
 readme = "README.md"
 license = { text = "BSD" }
-authors = [{ name = "Robin De Schepper", email = "robingilbert.deschepper@unipv.it" }]
+authors = [{ name = "Robin De Schepper", email = "robin@alexandria.sc" }]
 requires-python = ">=3.10"
 keywords = ["mpi", "pool", "lock", "synchronization"]
 dependencies = [
