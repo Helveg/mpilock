@@ -294,6 +294,10 @@ class _ReadLock:
         )
         self._otel_span_ctx = cm
         cm.__enter__()
+        # This instance owns the MPI registration only if it was the outermost
+        # one; nested instances must not touch MPI on either enter or exit, or
+        # the master's reader count goes out of sync with the actual readers.
+        self._registered = not nested
         if nested:
             ctrl._read_depth += 1
         else:
@@ -328,7 +332,7 @@ class _ReadLock:
     def __exit__(self, exc_type, exc_value, traceback):
         ctrl = self._ctrl
         ctrl._read_depth -= 1
-        if ctrl._read_depth == 0:
+        if self._registered:
             self._read_unlock()
         self._otel_span_ctx.__exit__(exc_type, exc_value, traceback)
 
@@ -354,21 +358,35 @@ class _WriteLock:
 
     def __enter__(self):
         ctrl = self._ctrl
-        nested = ctrl._write_depth > 0
+        in_write = ctrl._write_depth > 0
+        in_read = ctrl._read_depth > 0
+        # A write inside an outer read cannot just acquire: the outer read
+        # registered this rank as a reader, so the writer-mutex's spin on the
+        # master's count would never see zero. Promote: drop the read
+        # registration on enter, take the write exclusively, then re-register
+        # as a reader on exit so the outer `with c.read():` exits cleanly.
+        promoted = in_read and not in_write
         cm = _tracer.start_as_current_span(
             "mpilock.write",
             attributes={
                 "mpi.rank": ctrl._rank,
                 "mpi.master": ctrl._master,
-                "mpilock.nested": nested,
+                "mpilock.nested": in_write,
+                "mpilock.promoted": promoted,
             },
         )
         self._otel_span_ctx = cm
         cm.__enter__()
-        if nested:
+        # An instance only releases what it acquired: only the outer write (or a
+        # promoted write) holds the writer-mutex and must Unlock it on exit; only
+        # a promoted write needs to re-register as a reader on exit.
+        self._owns_window_lock = not in_write
+        self._promoted_from_read = promoted
+        if in_write:
             return self._nested_write_lock()
-        else:
-            return self._acquire_lock()
+        if promoted:
+            self._drop_reader_registration()
+        return self._acquire_lock()
 
     def _acquire_lock(self):
         ctrl = self._ctrl
@@ -409,6 +427,38 @@ class _WriteLock:
         elif self._fence is not None:  # pragma: nocover
             return self._fence
 
+    def _drop_reader_registration(self):
+        # Mirror of _ReadLock._read_unlock: undo the outer reader's atomic
+        # increment on the master's count so the writer-mutex spin can drain.
+        ctrl = self._ctrl
+        c = ctrl._count_window
+        m = ctrl._master
+        c.Lock(m, MPI.LOCK_SHARED)
+        neg = np.array([-1], dtype=np.int64)
+        c.Accumulate([neg, MPI.INT64_T], m, op=MPI.SUM)
+        c.Flush(m)
+        c.Unlock(m)
+
+    def _restore_reader_registration(self):
+        # Mirror of _ReadLock._read_lock: re-register this rank as a reader so
+        # the outer read context can exit cleanly. The writer-mutex hand-off has
+        # to go through the same w.Lock(m) gate readers use, or a new reader
+        # could slip past during the race window.
+        ctrl = self._ctrl
+        w = ctrl._write_window
+        c = ctrl._count_window
+        m = ctrl._master
+        w.Lock(m)
+        _dummy = np.zeros(1, dtype=np.uint64)
+        w.Get([_dummy, MPI.UINT64_T], m)
+        w.Flush(m)
+        c.Lock(m, MPI.LOCK_SHARED)
+        one = np.ones(1, dtype=np.int64)
+        c.Accumulate([one, MPI.INT64_T], m, op=MPI.SUM)
+        c.Flush(m)
+        c.Unlock(m)
+        w.Unlock(m)
+
     def __exit__(self, exc_type, exc_value, traceback):
         ctrl = self._ctrl
         ctrl._write_depth -= 1
@@ -416,11 +466,13 @@ class _WriteLock:
             warnings.warn(
                 "Exception during write lock. Deadlock might occur if you use `.collect`."
             )
-        if ctrl._write_depth == 0:
+        if self._owns_window_lock:
             ctrl._write_window.Unlock(ctrl._master)
             if self._fence is not None:
                 self._fence._comm.Barrier()
                 sys.stderr.flush()
+        if self._promoted_from_read:
+            self._restore_reader_registration()
         self._otel_span_ctx.__exit__(exc_type, exc_value, traceback)
 
 
