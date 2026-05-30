@@ -91,11 +91,20 @@ class WindowController:
         self._pump_thread = None
         self._pump_stop = None
         if pump and self._size > 1 and self._rank == self._master:
-            self._pump_stop = threading.Event()
-            self._pump_thread = threading.Thread(
-                target=self._pump, name="mpilock-progress", daemon=True
-            )
-            self._pump_thread.start()
+            if MPI.Query_thread() == MPI.THREAD_MULTIPLE:
+                self._pump_stop = threading.Event()
+                self._pump_thread = threading.Thread(
+                    target=self._pump, name="mpilock-progress", daemon=True
+                )
+                self._pump_thread.start()
+            else:
+                warnings.warn(
+                    "mpilock progress pump disabled: MPI runtime did not provide "
+                    "MPI_THREAD_MULTIPLE. Lock acquisitions will stall whenever the "
+                    "master is outside MPI. Initialize mpi4py with "
+                    "`mpi4py.rc.thread_level = 'multiple'` against a thread-multiple "
+                    "MPI build, or pass `pump=False` to silence this warning."
+                )
         atexit.register(lambda: self.close())
 
     def _pump(self):
