@@ -49,3 +49,13 @@ jobs:
         timeout --kill-after=10 90 coverage run -p -m unittest discover -v -s ./tests
         # Parallel tests
         timeout --kill-after=10 120 mpiexec --oversubscribe -n 4 coverage run -p -m unittest discover -v -s ./tests
+        # Merge the serial + per-rank .coverage.* files into a single XML for Codecov.
+        coverage combine || true
+        coverage xml || true
+    - name: Upload coverage to Codecov
+      if: always()
+      uses: codecov/codecov-action@v5
+      with:
+        files: ./coverage.xml
+        fail_ci_if_error: false
+        token: ${{ secrets.CODECOV_TOKEN }}
