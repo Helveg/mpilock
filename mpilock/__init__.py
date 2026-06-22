@@ -1,9 +1,10 @@
 __author__ = "Robin De Schepper"
 __email__ = "robingilbert.deschepper@unipv.it"
 
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 
 import mpi4py.MPI as MPI
+import atexit
 import os
 import sys
 import time
@@ -83,6 +84,25 @@ def _ensure_progress_pump(comm, master, interval):
             "thread": thread}
     _progress_pumps[key] = pump
     return pump
+
+
+def _stop_all_pumps():
+    """Stop every shared progress pump. Registered with ``atexit`` so the pump
+    threads leave MPI before the runtime finalizes: a pump thread still issuing
+    RMA/Iprobe while the main thread calls ``MPI_Finalize`` is undefined and
+    hangs intermittently. ``mpilock`` imports ``mpi4py.MPI`` (registering MPI's
+    own finalize) before registering this, so by ``atexit``'s LIFO order this
+    runs first. Stopping a pump is a local operation, never collective."""
+    for pump in _progress_pumps.values():
+        stop = pump.get("stop")
+        thread = pump.get("thread")
+        if stop is not None:
+            stop.set()
+        if thread is not None:
+            thread.join(timeout=1.0)
+
+
+atexit.register(_stop_all_pumps)
 
 
 def sync(comm=None, master=0, pump=None, pump_interval=1e-4):
