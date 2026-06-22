@@ -1,19 +1,88 @@
 __author__ = "Robin De Schepper"
 __email__ = "robingilbert.deschepper@unipv.it"
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 import mpi4py.MPI as MPI
 import os
 import sys
 import time
-import atexit
 import threading
 import warnings
 import numpy as np
 from opentelemetry import trace as _otel_trace
 
 _tracer = _otel_trace.get_tracer("mpilock", __version__)
+
+
+# One progress pump per (communicator, master), shared by every WindowController
+# on that comm. Keeping the master's MPI progress engine turning is a per-process
+# concern, not a per-lock one: a pump thread per controller leaks a thread for
+# every controller ever created and floods the comm with redundant RMA + Iprobe
+# traffic, which eventually perturbs collectives into a deadlock. A single shared
+# pump drives progress for all of the comm's windows. The per-controller lock
+# windows stay independent, so locks on different resources never serialize
+# against each other. The dict keeps the comm alive, so its id is never recycled.
+_progress_pumps: dict = {}
+
+
+def _progress_pump_loop(comm, master, interval, window, stop):
+    # Keep the MPI progress engine turning so passive-target RMA from other ranks
+    # against the master's windows (lock acquires and releases) completes while
+    # this rank's main thread is busy with non-MPI work. A bare Iprobe drives the
+    # engine too weakly to clear many concurrent acquisitions; a real RMA op
+    # (lock + get + flush + unlock) on a private window pushes it hard enough that
+    # they complete promptly. Driving progress is global to the process, so this
+    # one pump advances passive RMA on every controller's windows, not just its
+    # own. The window is owned by the pump alone, so locking it never contends
+    # with the lock protocol's own windows.
+    dummy = np.zeros(1, dtype=np.uint64)
+    while not stop.is_set():
+        try:
+            window.Lock(master, MPI.LOCK_SHARED)
+            window.Get([dummy, MPI.UINT64_T], master)
+            window.Flush(master)
+            window.Unlock(master)
+            comm.Iprobe(MPI.ANY_SOURCE, MPI.ANY_TAG)
+        except Exception:  # pragma: no cover
+            break
+        time.sleep(interval)
+
+
+def _ensure_progress_pump(comm, master, interval):
+    """Start (once) the shared progress pump for ``comm``. Collective: every rank
+    creates the shared pump window together on first call; only the master runs
+    the pump thread."""
+    key = (id(comm), master)
+    pump = _progress_pumps.get(key)
+    if pump is not None:
+        return pump
+    # Collective window creation: all ranks participate, master alone pumps it.
+    buffer = np.zeros(1, dtype=np.uint64)
+    window = MPI.Win.Create(buffer, True, MPI.INFO_NULL, comm)
+    stop = threading.Event()
+    thread = None
+    if comm.Get_rank() == master:
+        if MPI.Query_thread() == MPI.THREAD_MULTIPLE:
+            thread = threading.Thread(
+                target=_progress_pump_loop,
+                args=(comm, master, interval, window, stop),
+                name="mpilock-progress",
+                daemon=True,
+            )
+            thread.start()
+        else:  # pragma: no cover
+            warnings.warn(
+                "mpilock progress pump disabled: MPI runtime did not provide "
+                "MPI_THREAD_MULTIPLE. Lock acquisitions will stall whenever the "
+                "master is outside MPI. Initialize mpi4py with "
+                "`mpi4py.rc.thread_level = 'multiple'` against a thread-multiple "
+                "MPI build, or pass `pump=False` to silence this warning."
+            )
+    pump = {"comm": comm, "buffer": buffer, "window": window, "stop": stop,
+            "thread": thread}
+    _progress_pumps[key] = pump
+    return pump
 
 
 def sync(comm=None, master=0, pump=None, pump_interval=1e-4):
@@ -75,62 +144,23 @@ class WindowController:
 
         # Reader count (lives canonically in the master's window) and the writer mutex
         # window. The buffers on non-master ranks are unused; all RMA targets the master.
+        # These windows are per-controller, so locks on different resources are
+        # independent and never serialize against each other.
         self._count_buffer = np.zeros(1, dtype=np.int64)
         self._write_buffer = np.zeros(1, dtype=np.uint64)
-        # A private window the master's progress pump operates on; touched by no one else.
-        self._pump_buffer = np.zeros(1, dtype=np.uint64)
         self._count_window = self._window(self._count_buffer)
         self._write_window = self._window(self._write_buffer)
-        self._pump_window = self._window(self._pump_buffer)
         # Re-entrant locks are tracked locally; only the outermost lock touches the master.
         self._read_depth = 0
         self._write_depth = 0
         self._closed = False
 
-        self._pump_interval = pump_interval
-        self._pump_thread = None
-        self._pump_stop = None
-        if pump and self._size > 1 and self._rank == self._master:
-            if MPI.Query_thread() == MPI.THREAD_MULTIPLE:
-                self._pump_stop = threading.Event()
-                self._pump_thread = threading.Thread(
-                    target=self._pump, name="mpilock-progress", daemon=True
-                )
-                self._pump_thread.start()
-            else:  # pragma: no cover
-                warnings.warn(
-                    "mpilock progress pump disabled: MPI runtime did not provide "
-                    "MPI_THREAD_MULTIPLE. Lock acquisitions will stall whenever the "
-                    "master is outside MPI. Initialize mpi4py with "
-                    "`mpi4py.rc.thread_level = 'multiple'` against a thread-multiple "
-                    "MPI build, or pass `pump=False` to silence this warning."
-                )
-        atexit.register(lambda: self.close())
-
-    def _pump(self):
-        # Keep the MPI progress engine turning so passive-target RMA from other ranks
-        # against the master's windows (lock acquires and releases) completes while this
-        # rank's main thread is busy with non-MPI work. A bare Iprobe drives the engine
-        # too weakly to clear many concurrent acquisitions; a real RMA op (lock + get +
-        # flush + unlock) on a private window pushes it hard enough that they complete
-        # promptly. The window is owned by this pump alone, so locking it never contends
-        # with the lock protocol's own windows.
-        comm = self._comm
-        stop = self._pump_stop
-        interval = self._pump_interval
-        m = self._master
-        pw = self._pump_window
-        dummy = np.zeros(1, dtype=np.uint64)
-        while not stop.is_set():
-            try:
-                pw.Lock(m, MPI.LOCK_SHARED)
-                pw.Get([dummy, MPI.UINT64_T], m)
-                pw.Flush(m)
-                pw.Unlock(m)
-                comm.Iprobe(MPI.ANY_SOURCE, MPI.ANY_TAG)
-            except Exception:  # pragma: no cover
-                break
-            time.sleep(interval)
+        # Drive MPI progress via the shared per-comm pump rather than a private
+        # thread, so opening many controllers does not leak a thread each. The
+        # call is collective on first use (it creates the shared pump window) and
+        # a cheap cache hit thereafter.
+        if pump and self._size > 1:
+            _ensure_progress_pump(comm, master, pump_interval)
 
     @property
     def master(self):
@@ -156,19 +186,19 @@ class WindowController:
 
     def close(self):
         """
-        Close the ``WindowController``, stop the progress pump, and free its MPI Windows.
+        Close the ``WindowController`` and free its MPI Windows.
+
+        The progress pump is shared per communicator and outlives individual
+        controllers, so it is not stopped here. ``Win.Free`` is collective, so
+        only call ``close()`` (or use the controller as a context manager) at a
+        point all ranks reach symmetrically.
         """
         if self._closed:
             return
         self._closed = True
-        if self._pump_thread is not None:
-            self._pump_stop.set()
-            self._pump_thread.join(timeout=1.0)
-            self._pump_thread = None
         try:
             self._count_window.Free()
             self._write_window.Free()
-            self._pump_window.Free()
         except MPI.Exception:  # pragma: no cover
             pass
 
